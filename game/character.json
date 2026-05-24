@@ -1,0 +1,19 @@
+{
+  "name": "Blarg Thompson",
+  "skin_tone": "Light",
+  "hair_color": [
+    0.25,
+    0.15,
+    0.08
+  ],
+  "shirt_color": [
+    0.2,
+    0.25,
+    0.35
+  ],
+  "pants_color": [
+    0.15,
+    0.15,
+    0.2
+  ]
+}
