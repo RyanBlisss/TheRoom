@@ -1,0 +1,39 @@
+[package]
+name = "the_room"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "the_room"
+path = "src/main.rs"
+
+[dependencies]
+# OpenGL + windowing
+glutin = "0.28"
+winit  = "0.26"
+gl     = "0.14"
+glow   = "0.12"
+
+# UI
+egui      = "0.22"
+egui_glow = { version = "0.22", features = ["winit"] }
+
+# Math
+nalgebra     = "0.32"
+nalgebra-glm = "0.18"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio
+rodio = "0.17"
+
+# Image loading (textures)
+image = "0.24"
+
+# Random
+rand = "0.8"
+
+# Time
+instant = "0.1"
