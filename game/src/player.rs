@@ -98,8 +98,14 @@ impl Player {
             self.vel_y      += GRAVITY * dt;
             self.position.y += self.vel_y * dt;
 
-            // Ground: snap to nearest floor below the player.
-            let floor_y = nearest_floor_below(self.position);
+            let floor_y   = nearest_floor_below(self.position);
+            let ceiling_y = floor_y + crate::world::WALL_H - PLAYER_HEIGHT;
+
+            if self.position.y >= ceiling_y {
+                self.position.y = ceiling_y;
+                self.vel_y      = self.vel_y.min(0.0); // kill upward velocity only
+            }
+
             if self.position.y <= floor_y {
                 self.position.y = floor_y;
                 self.vel_y      = 0.0;

@@ -22,6 +22,7 @@ use glutin::{
     window::WindowBuilder,
     ContextBuilder,
 };
+use winit::window::Fullscreen;
 use nalgebra_glm as glm;
 
 #[cfg(target_os = "macos")]
@@ -115,6 +116,13 @@ impl PlayingState {
         for item in self.items.iter_mut() {
             if item.picked_up { continue; }
             if glm::distance(&eye, &item.position) <= range {
+                if !item.pickupable {
+                    match &item.kind {
+                        ItemKind::CdPlayer => self.show_msg("CD Player — insert a CD to play."),
+                        _ => self.show_msg("You can't pick that up."),
+                    }
+                    return;
+                }
                 item.picked_up = true;
                 let label = item.label;
                 self.inventory.add(item.kind.clone());
@@ -530,9 +538,11 @@ impl App {
         self.shader.use_program();
         self.shader.set_mat4("projection", &g.projection);
         self.shader.set_mat4("view",       &g.player.view_matrix());
+        let eye = g.player.eye_position();
         self.shader.set_vec3("lightPos",   &glm::vec3(0.0_f32, 2.5, 0.0));
+        self.shader.set_vec3("eyePos",     &eye);
         self.shader.set_vec3("lightColor", &glm::vec3(1.0_f32, 0.95, 0.85));
-        self.shader.set_float("ambientStrength", lerp(0.25, 0.55, g.sanity.normalised()));
+        self.shader.set_float("ambientStrength", lerp(0.08, 0.28, g.sanity.normalised()));
         self.shader.set_float("sanity",    g.sanity.normalised());
 
         let id: glm::Mat4 = glm::identity();
@@ -924,7 +934,7 @@ impl App {
         }
     }
 
-    fn render_settings(&mut self, _window: &glutin::window::Window, return_to: GamePhase) {
+    fn render_settings(&mut self, window: &glutin::window::Window, return_to: GamePhase) {
         let mut s = self.settings.clone();
         let mut back = false;
 
@@ -961,6 +971,11 @@ impl App {
         self.paint_egui(out);
         if back {
             self.settings.save();
+            if self.settings.fullscreen {
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            } else {
+                window.set_fullscreen(None);
+            }
             self.phase = return_to;
         }
     }

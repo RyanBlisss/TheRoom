@@ -14,17 +14,18 @@ const GRAVITY: f32 = -9.81;
 
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub kind:      ItemKind,
-    pub position:  glm::Vec3,
-    pub picked_up: bool,
-    pub label:     &'static str,
-    pub vel_y:     f32,
-    pub landed:    bool,
+    pub kind:       ItemKind,
+    pub position:   glm::Vec3,
+    pub picked_up:  bool,
+    pub pickupable: bool,
+    pub label:      &'static str,
+    pub vel_y:      f32,
+    pub landed:     bool,
 }
 
 impl Item {
     fn make(kind: ItemKind, pos: glm::Vec3, label: &'static str) -> Self {
-        Self { kind, position: pos, picked_up: false, label, vel_y: 0.0, landed: false }
+        Self { kind, position: pos, picked_up: false, pickupable: true, label, vel_y: 0.0, landed: false }
     }
     pub fn key(room_id: usize, pos: glm::Vec3) -> Self {
         Self::make(ItemKind::Key { room_id }, pos, "Key")
@@ -39,12 +40,15 @@ impl Item {
         Self::make(ItemKind::Cd, pos, "CD")
     }
     pub fn cd_player(pos: glm::Vec3) -> Self {
-        Self::make(ItemKind::CdPlayer, pos, "CD Player")
+        let mut item = Self::make(ItemKind::CdPlayer, pos, "CD Player");
+        item.pickupable = false;
+        item.landed = true;  // fixed furniture, no physics
+        item
     }
 
     /// Apply gravity each frame until item rests on floor_y.
     pub fn physics_tick(&mut self, dt: f32, floor_y: f32) {
-        if self.picked_up || self.landed { return; }
+        if self.picked_up || self.landed || !self.pickupable { return; }
         self.vel_y      += GRAVITY * dt;
         self.position.y += self.vel_y * dt;
         let rest_y = floor_y + ITEM_HALF_SIZE;
