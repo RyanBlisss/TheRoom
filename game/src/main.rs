@@ -215,6 +215,7 @@ struct App {
     modifiers:      ModifiersState,
     mouse_pos:      egui::Pos2,
     window_size:    [u32; 2],
+    game_vp:        [i32; 4], // 16:9 sub-viewport [x, y, w, h]
     last:           Instant,
     focused:        bool,
 }
@@ -266,6 +267,7 @@ impl App {
             modifiers:      ModifiersState::empty(),
             mouse_pos:      egui::Pos2::ZERO,
             window_size:    [size.width, size.height],
+            game_vp:        compute_game_viewport(size.width, size.height),
             last:           Instant::now(),
             focused:        true,
         }
@@ -299,6 +301,9 @@ impl App {
         let [w, h] = self.window_size;
         let clipped = self.egui_ctx.tessellate(output.shapes);
         unsafe {
+            // egui fills the full window — reset scissor and viewport first
+            gl::Disable(gl::SCISSOR_TEST);
+            gl::Viewport(0, 0, w as i32, h as i32);
             gl::Disable(gl::DEPTH_TEST);
             gl::Disable(gl::CULL_FACE);
         }
@@ -329,10 +334,11 @@ impl App {
         match event {
             WindowEvent::Resized(size) => {
                 self.window_size = [size.width, size.height];
+                self.game_vp     = compute_game_viewport(size.width, size.height);
                 self.egui_scale  = window.scale_factor() as f32;
                 if let Some(g) = &mut self.game {
-                    let aspect = size.width as f32 / size.height.max(1) as f32;
-                    g.projection = glm::perspective(aspect, self.settings.fov.to_radians(), 0.05, 200.0);
+                    let [_, _, vw, vh] = self.game_vp;
+                    g.projection = glm::perspective(vw as f32 / vh.max(1) as f32, self.settings.fov.to_radians(), 0.05, 200.0);
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -486,8 +492,16 @@ impl App {
 
     fn render(&mut self, window: &glutin::window::Window) {
         let [w, h] = self.window_size;
+        let [vx, vy, vw, vh] = self.game_vp;
         unsafe {
+            // Black letterbox bars
             gl::Viewport(0, 0, w as i32, h as i32);
+            gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            // Constrained 16:9 game viewport
+            gl::Enable(gl::SCISSOR_TEST);
+            gl::Scissor(vx, vy, vw, vh);
+            gl::Viewport(vx, vy, vw, vh);
             gl::ClearColor(0.02, 0.02, 0.025, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
@@ -782,8 +796,8 @@ impl App {
 
         if let Some(GamePhase::Playing) = &next {
             self.character.save();
-            let [w, h] = self.window_size;
-            self.game = Some(PlayingState::new(&self.character, &self.settings, w, h));
+            let [_, _, vw, vh] = self.game_vp;
+            self.game = Some(PlayingState::new(&self.character, &self.settings, vw as u32, vh as u32));
             self.phase = GamePhase::Playing;
             self.inventory_open = false;
             self.capture(window, true);
@@ -879,8 +893,8 @@ impl App {
 
         match next {
             Some(GamePhase::Playing) => {
-                let [w, h] = self.window_size;
-                self.game = Some(PlayingState::new(&self.character, &self.settings, w, h));
+                let [_, _, vw, vh] = self.game_vp;
+                self.game = Some(PlayingState::new(&self.character, &self.settings, vw as u32, vh as u32));
                 self.phase = GamePhase::Playing;
                 self.capture(window, true);
             }
@@ -1094,6 +1108,23 @@ fn build_crosshair_vao() -> (u32, i32) {
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+
+/// Returns [x, y, w, h] for a centered 16:9 sub-viewport within window (w×h).
+fn compute_game_viewport(w: u32, h: u32) -> [i32; 4] {
+    const ASPECT: f32 = 16.0 / 9.0;
+    let actual = w as f32 / h.max(1) as f32;
+    if actual > ASPECT {
+        // window wider than 16:9 — pillarbox
+        let vw = (h as f32 * ASPECT) as i32;
+        let vx = (w as i32 - vw) / 2;
+        [vx, 0, vw, h as i32]
+    } else {
+        // window taller than 16:9 — letterbox
+        let vh = (w as f32 / ASPECT) as i32;
+        let vy = (h as i32 - vh) / 2;
+        [0, vy, w as i32, vh]
+    }
+}
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
