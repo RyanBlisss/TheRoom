@@ -240,57 +240,65 @@ fn build_rooms() -> Vec<Room> {
     let y2 = FLOOR_2;
     let y3 = FLOOR_2 + WALL_H;
 
-    // Muted, moody colours for each room
     vec![
         // ── Floor 1 ──────────────────────────────────────────────────────────
+        // Warm cream/amber — welcoming main room, hotel lobby feel
         Room::new(ROOM_MAIN,    "Main Room",    1,
             glm::vec3(-5.0, y0, -5.0), glm::vec3( 5.0, y1,  5.0),
-            glm::vec3(0.20, 0.18, 0.16)),
+            glm::vec3(0.72, 0.62, 0.48)),
 
+        // Teal — classic hotel bathroom tiles
         Room::new(ROOM_BATH,    "Bathroom",     1,
             glm::vec3(-9.0, y0, -3.0), glm::vec3(-5.0, y1,  3.0),
-            glm::vec3(0.14, 0.18, 0.20)),
+            glm::vec3(0.38, 0.62, 0.65)),
 
-        Room::new(ROOM_BED_A,   "Bedroom",      1,
+        // Dusty mauve — cozy bedroom A
+        Room::new(ROOM_BED_A,   "Bedroom A",    1,
             glm::vec3(-5.0, y0,  5.0), glm::vec3( 3.0, y1, 12.0),
-            glm::vec3(0.15, 0.13, 0.18)),
+            glm::vec3(0.60, 0.50, 0.65)),
 
-        Room::new(ROOM_BED_B,   "Bedroom",      1,
+        // Sage green — bedroom B, slightly different feel
+        Room::new(ROOM_BED_B,   "Bedroom B",    1,
             glm::vec3( 3.0, y0,  5.0), glm::vec3(10.0, y1, 12.0),
-            glm::vec3(0.16, 0.13, 0.17)),
+            glm::vec3(0.48, 0.62, 0.52)),
 
+        // Cool blue-grey — the long eerie corridor
         Room::new(ROOM_HALL,    "Hall",         1,
             glm::vec3(-5.0, y0, -12.0), glm::vec3( 5.0, y1, -5.0),
-            glm::vec3(0.13, 0.13, 0.13)),
+            glm::vec3(0.48, 0.52, 0.60)),
 
+        // Warm yellow — kitchen warmth
         Room::new(ROOM_KITCHEN, "Kitchen",      1,
             glm::vec3(-10.0, y0, -12.0), glm::vec3(-5.0, y1, -5.0),
-            glm::vec3(0.17, 0.17, 0.14)),
+            glm::vec3(0.70, 0.66, 0.42)),
 
+        // Terracotta — dining room earthy warmth
         Room::new(ROOM_DINING,  "Dining Room",  1,
             glm::vec3( 5.0, y0, -12.0), glm::vec3(12.0, y1, -5.0),
-            glm::vec3(0.16, 0.14, 0.12)),
+            glm::vec3(0.68, 0.50, 0.38)),
 
-        // ── Floor 2 ──────────────────────────────────────────────────────────
+        // ── Floor 2 — same palette but deeper/more saturated, feels wrong ──
         Room::new(ROOM_F2_BATH,  "Bathroom",    2,
             glm::vec3(-9.0, y2, -3.0), glm::vec3(-5.0, y3,  3.0),
-            glm::vec3(0.12, 0.16, 0.18)),
+            glm::vec3(0.28, 0.52, 0.58)),
 
-        Room::new(ROOM_F2_BED_A, "Bedroom",     2,
+        Room::new(ROOM_F2_BED_A, "Bedroom A",   2,
             glm::vec3(-5.0, y2,  5.0), glm::vec3( 3.0, y3, 12.0),
-            glm::vec3(0.13, 0.11, 0.16)),
+            glm::vec3(0.50, 0.38, 0.58)),
 
-        Room::new(ROOM_F2_BED_B, "Bedroom",     2,
+        Room::new(ROOM_F2_BED_B, "Bedroom B",   2,
             glm::vec3( 3.0, y2,  5.0), glm::vec3(10.0, y3, 12.0),
-            glm::vec3(0.14, 0.11, 0.15)),
+            glm::vec3(0.36, 0.52, 0.42)),
 
+        // Upper hall — noticeably colder and darker than floor 1
         Room::new(ROOM_F2_HALL,  "Upper Hall",  2,
             glm::vec3(-5.0, y2, -12.0), glm::vec3( 5.0, y3, -5.0),
-            glm::vec3(0.11, 0.11, 0.11)),
+            glm::vec3(0.36, 0.38, 0.48)),
 
+        // The Room — deep blood red, the final boss room
         Room::new(ROOM_THE_ROOM, "The Room",    2,
             glm::vec3( 5.0, y2, -12.0), glm::vec3(14.0, y3, -3.0),
-            glm::vec3(0.08, 0.04, 0.04)),
+            glm::vec3(0.45, 0.12, 0.12)),
     ]
 }
 

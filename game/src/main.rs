@@ -12,6 +12,7 @@ mod world;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
+use rand::Rng;
 
 use glutin::{
     event::{
@@ -57,6 +58,8 @@ struct PlayingState {
     message:       Option<(String, Instant)>,
     projection:    glm::Mat4,
     selected_slot: usize,
+    cd_playing:    bool,
+    cd_restore_acc: f32,
 }
 
 impl PlayingState {
@@ -99,14 +102,35 @@ impl PlayingState {
             items,
             item_meshes,
             audio:         AudioManager::new(),
-            message:       None,
-            projection:    glm::perspective(aspect, settings.fov.to_radians(), 0.05, 200.0),
-            selected_slot: 0,
+            message:        None,
+            projection:     glm::perspective(aspect, settings.fov.to_radians(), 0.05, 200.0),
+            selected_slot:  0,
+            cd_playing:     false,
+            cd_restore_acc: 0.0,
         }
     }
 
     fn show_msg(&mut self, msg: impl Into<String>) {
         self.message = Some((msg.into(), Instant::now()));
+    }
+
+    fn shuffle_items(&mut self) {
+        let mut rng = rand::thread_rng();
+        let rooms = &self.world.rooms;
+        for item in self.items.iter_mut() {
+            if item.picked_up || !item.pickupable { continue; }
+            // Pick a random unlocked room
+            let unlocked: Vec<_> = rooms.iter().filter(|r| r.unlocked).collect();
+            if unlocked.is_empty() { continue; }
+            let room = unlocked[rng.gen_range(0..unlocked.len())];
+            let margin = 1.0_f32;
+            let x = rng.gen_range((room.min.x + margin)..(room.max.x - margin));
+            let z = rng.gen_range((room.min.z + margin)..(room.max.z - margin));
+            let y = if room.floor == 2 { world::FLOOR_2 + 1.0 } else { 1.0 };
+            item.position = glm::vec3(x, y, z);
+            item.landed   = false;
+            item.vel_y    = 0.0;
+        }
     }
 
     fn try_interact(&mut self) {
@@ -118,13 +142,28 @@ impl PlayingState {
             if glm::distance(&eye, &item.position) <= range {
                 if !item.pickupable {
                     match &item.kind {
-                        ItemKind::CdPlayer => self.show_msg("CD Player — insert a CD to play."),
+                        ItemKind::CdPlayer => {
+                            if self.cd_playing {
+                                self.show_msg("The music plays softly...");
+                            } else if self.inventory.has_cd() {
+                                if let Some(pos) = self.inventory.items.iter().position(|k| k == &ItemKind::Cd) {
+                                    self.inventory.items.remove(pos);
+                                }
+                                self.cd_playing = true;
+                                self.show_msg("You insert the CD. Music fills the room.");
+                            } else {
+                                self.show_msg("CD Player — you need a CD to play.");
+                            }
+                        }
                         _ => self.show_msg("You can't pick that up."),
                     }
                     return;
                 }
                 item.picked_up = true;
                 let label = item.label;
+                if matches!(item.kind, ItemKind::SanityPill) {
+                    self.audio.play_pill_pickup();
+                }
                 self.inventory.add(item.kind.clone());
                 self.show_msg(format!("Picked up: {}", label));
                 return;
@@ -138,6 +177,8 @@ impl PlayingState {
                 if self.inventory.use_key_for(key_room) {
                     self.world.open_door(door_idx);
                     self.sanity.permanent_hit();
+                    self.audio.play_door_unlock();
+                    self.shuffle_items();
                     self.show_msg("The lock clicks open. Something feels different.");
                 } else {
                     self.show_msg("Locked. You need a key.");
@@ -155,10 +196,23 @@ impl PlayingState {
             Some(ItemKind::SanityPill) => {
                 if self.sanity.use_pill() {
                     self.inventory.items.remove(self.selected_slot);
+                    self.audio.play_pill_pickup();
                     self.show_msg("The pill helps. A little.");
                 } else {
                     self.show_msg("You're as clear-headed as you're going to get.");
                 }
+            }
+            Some(ItemKind::WindUpToy) => {
+                self.inventory.items.remove(self.selected_slot);
+                let s = ITEM_HALF_SIZE;
+                let drop_pos = glm::vec3(self.player.position.x, 1.0, self.player.position.z);
+                let mut toy = Item::wind_up_toy(drop_pos);
+                toy.landed = false;
+                let (v, ix) = renderer::build_box(glm::vec3(-s,-s,-s), glm::vec3(s,s,s));
+                self.item_meshes.push(Mesh::new(&v, &ix, item_color(&ItemKind::WindUpToy)));
+                self.items.push(toy);
+                self.sanity.current = (self.sanity.current + 0.04).min(self.sanity.base);
+                self.show_msg("You wind it up and set it down. The clicking echoes through the hall.");
             }
             Some(_) => self.show_msg("Can't use that right now."),
             None    => self.show_msg("Nothing selected."),
@@ -170,6 +224,17 @@ impl PlayingState {
 
     fn update(&mut self, keys: &HashSet<VirtualKeyCode>, dt: f32) {
         self.sanity.tick(dt);
+
+        if self.cd_playing {
+            self.cd_restore_acc += dt;
+            // Restore ~10% sanity over 60 seconds while music plays
+            if self.cd_restore_acc >= 1.0 {
+                self.cd_restore_acc = 0.0;
+                self.sanity.current = (self.sanity.current + 0.006).min(self.sanity.base);
+            }
+        }
+
+        self.audio.tick_heartbeat(self.sanity.insanity(), dt);
         self.player.update(keys, dt, &self.world.walls, Some(&self.world.stairs));
 
         for item in &mut self.items {
@@ -218,6 +283,9 @@ struct App {
     game_vp:        [i32; 4], // 16:9 sub-viewport [x, y, w, h]
     last:           Instant,
     focused:        bool,
+    fps:            f32,
+    fps_accum:      f32,
+    fps_frames:     u32,
 }
 
 impl App {
@@ -270,6 +338,9 @@ impl App {
             game_vp:        compute_game_viewport(size.width, size.height),
             last:           Instant::now(),
             focused:        true,
+            fps:            0.0,
+            fps_accum:      0.0,
+            fps_frames:     0,
         }
     }
 
@@ -461,7 +532,7 @@ impl App {
     fn on_mouse_motion(&mut self, dx: f64, dy: f64) {
         if self.mouse_captured && !self.inventory_open {
             if let Some(g) = &mut self.game {
-                g.player.apply_mouse(dx as f32, dy as f32);
+                g.player.apply_mouse(dx as f32, dy as f32, self.settings.mouse_sensitivity);
             }
         }
     }
@@ -472,6 +543,14 @@ impl App {
         let now = Instant::now();
         let dt  = now.duration_since(self.last).as_secs_f32().min(0.05);
         self.last = now;
+
+        self.fps_accum  += dt;
+        self.fps_frames += 1;
+        if self.fps_accum >= 0.5 {
+            self.fps       = self.fps_frames as f32 / self.fps_accum;
+            self.fps_accum  = 0.0;
+            self.fps_frames = 0;
+        }
 
         self.network.tick();
 
@@ -566,7 +645,7 @@ impl App {
         self.shader.set_vec3("lightPos",   &glm::vec3(0.0_f32, 2.5, 0.0));
         self.shader.set_vec3("eyePos",     &eye);
         self.shader.set_vec3("lightColor", &glm::vec3(1.0_f32, 0.95, 0.85));
-        self.shader.set_float("ambientStrength", lerp(0.08, 0.28, g.sanity.normalised()));
+        self.shader.set_float("ambientStrength", lerp(0.15, 0.55, g.sanity.normalised()));
         self.shader.set_float("sanity",    g.sanity.normalised());
 
         let id: glm::Mat4 = glm::identity();
@@ -597,21 +676,64 @@ impl App {
         let msg      = self.game.as_ref().and_then(|g| g.message.as_ref()).map(|(m,_)| m.clone());
         let sel      = self.game.as_ref().map(|g| g.selected_slot).unwrap_or(0);
         let inv: Vec<ItemKind> = self.game.as_ref().map(|g| g.inventory.items.clone()).unwrap_or_default();
+        let room_name = self.game.as_ref().map(|g| g.world.room_name_at(&g.player.position)).unwrap_or("");
+        let fps      = self.fps;
+        let show_fps = self.settings.show_fps;
 
         let raw = self.take_raw_input();
         let out = self.egui_ctx.run(raw, |ctx| {
-            // Sanity bar
+            // ── Sanity vignette overlay ───────────────────────────────────
+            let insanity = 1.0 - sanity;
+            if insanity > 0.05 {
+                egui::Area::new("vignette")
+                    .anchor(egui::Align2::LEFT_TOP, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        let screen = ctx.screen_rect();
+                        let p = ui.painter();
+                        let alpha = (insanity * insanity * 210.0) as u8;
+                        let col = egui::Color32::from_rgba_premultiplied(90, 0, 10, alpha);
+                        let edge = screen.width().min(screen.height()) * 0.30;
+                        // Four edge strips — darkness closing in
+                        p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + edge)), 0.0, col);
+                        p.rect_filled(egui::Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - edge), screen.max), 0.0, col);
+                        p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.min.x + edge, screen.max.y)), 0.0, col);
+                        p.rect_filled(egui::Rect::from_min_max(egui::pos2(screen.max.x - edge, screen.min.y), screen.max), 0.0, col);
+                    });
+            }
+
+            // ── Room name — top left ──────────────────────────────────────
+            egui::Area::new("room_name")
+                .anchor(egui::Align2::LEFT_TOP, [14.0, 14.0])
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new(room_name)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgba_premultiplied(220, 210, 190, 160)));
+                });
+
+            // ── FPS counter — top right ───────────────────────────────────
+            if show_fps {
+                egui::Area::new("fps")
+                    .anchor(egui::Align2::RIGHT_TOP, [-14.0, 14.0])
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(format!("{:.0} fps", fps))
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(80))
+                            .monospace());
+                    });
+            }
+
+            // ── Sanity bar — bottom center ────────────────────────────────
             egui::Area::new("sanity_bar")
                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -24.0])
                 .show(ctx, |ui| {
                     ui.label(egui::RichText::new("SANITY").size(10.0).color(egui::Color32::from_gray(70)));
-                    let color = if sanity > 0.5 { egui::Color32::from_rgb(80,160,210) }
-                                else if sanity > 0.25 { egui::Color32::from_rgb(180,130,50) }
-                                else { egui::Color32::from_rgb(180,50,50) };
+                    let color = if sanity > 0.5 { egui::Color32::from_rgb(80, 175, 120) }
+                                else if sanity > 0.25 { egui::Color32::from_rgb(200, 155, 50) }
+                                else { egui::Color32::from_rgb(200, 55, 55) };
                     ui.add(egui::ProgressBar::new(sanity).desired_width(200.0).fill(color));
                 });
 
-            // Hotbar
+            // ── Hotbar ────────────────────────────────────────────────────
             egui::Area::new("hotbar")
                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -72.0])
                 .show(ctx, |ui| {
@@ -619,29 +741,38 @@ impl App {
                         for i in 0..5usize {
                             let label = inv.get(i).map(item_label).unwrap_or("·");
                             let is_sel = i == sel;
-                            let col = if is_sel { egui::Color32::from_rgb(220,180,80) }
-                                      else      { egui::Color32::from_gray(55) };
+                            let col = if is_sel { egui::Color32::from_rgb(235, 195, 90) }
+                                      else      { egui::Color32::from_gray(60) };
                             egui::Frame::none()
-                                .fill(egui::Color32::from_rgba_premultiplied(8,6,10,170))
-                                .stroke(egui::Stroke::new(if is_sel {1.5} else {0.5}, col))
-                                .inner_margin(egui::style::Margin::symmetric(6.0, 4.0))
+                                .fill(egui::Color32::from_rgba_premultiplied(10, 8, 12, 185))
+                                .stroke(egui::Stroke::new(if is_sel { 2.0 } else { 0.5 }, col))
+                                .rounding(egui::Rounding::same(3.0))
+                                .inner_margin(egui::style::Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(label).size(11.0).color(col).monospace());
+                                    ui.label(egui::RichText::new(label).size(12.0).color(col).monospace());
                                 });
                         }
                     });
                 });
 
-            // Message
+            // ── Message ───────────────────────────────────────────────────
             if let Some(m) = &msg {
                 egui::Area::new("msg")
                     .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -120.0])
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(m.as_str()).size(13.0).color(egui::Color32::from_gray(180)));
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_premultiplied(6, 5, 8, 160))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::style::Margin::symmetric(10.0, 5.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(m.as_str())
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(230, 220, 200)));
+                            });
                     });
             }
 
-            // Hint
+            // ── Hint ──────────────────────────────────────────────────────
             egui::Area::new("hint")
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
                 .show(ctx, |ui| {
@@ -979,6 +1110,9 @@ impl App {
                         ui.label(egui::RichText::new("Master Volume").color(egui::Color32::from_gray(130)));
                         ui.add(egui::Slider::new(&mut s.master_volume, 0.0..=1.0).fixed_decimals(2));
                         ui.end_row();
+                        ui.label(egui::RichText::new("Fullscreen").color(egui::Color32::from_gray(130)));
+                        ui.checkbox(&mut s.fullscreen, "");
+                        ui.end_row();
                         ui.label(egui::RichText::new("Show FPS").color(egui::Color32::from_gray(130)));
                         ui.checkbox(&mut s.show_fps, "");
                         ui.end_row();
@@ -995,6 +1129,9 @@ impl App {
         self.paint_egui(out);
         if back {
             self.settings.save();
+            if let Some(g) = &mut self.game {
+                g.audio.set_volume(self.settings.master_volume);
+            }
             if self.settings.fullscreen {
                 window.set_fullscreen(Some(Fullscreen::Borderless(None)));
             } else {
@@ -1009,11 +1146,11 @@ impl App {
 
 fn item_color(kind: &ItemKind) -> glm::Vec3 {
     match kind {
-        ItemKind::Key { .. }  => glm::vec3(0.8, 0.7, 0.1),
-        ItemKind::SanityPill  => glm::vec3(0.2, 0.8, 0.4),
-        ItemKind::WindUpToy   => glm::vec3(0.7, 0.3, 0.1),
-        ItemKind::Cd          => glm::vec3(0.6, 0.6, 0.9),
-        ItemKind::CdPlayer    => glm::vec3(0.4, 0.4, 0.5),
+        ItemKind::Key { .. }  => glm::vec3(1.00, 0.85, 0.15), // bright gold
+        ItemKind::SanityPill  => glm::vec3(0.20, 0.95, 0.45), // vivid green
+        ItemKind::WindUpToy   => glm::vec3(0.95, 0.45, 0.10), // punchy orange
+        ItemKind::Cd          => glm::vec3(0.65, 0.80, 1.00), // icy blue-white
+        ItemKind::CdPlayer    => glm::vec3(0.55, 0.45, 0.30), // warm brown
     }
 }
 

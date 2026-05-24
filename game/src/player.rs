@@ -116,9 +116,9 @@ impl Player {
         }
     }
 
-    pub fn apply_mouse(&mut self, dx: f32, dy: f32) {
-        self.yaw   -= dx * MOUSE_SENSITIVITY;
-        self.pitch  = (self.pitch - dy * MOUSE_SENSITIVITY).clamp(-1.4, 1.4);
+    pub fn apply_mouse(&mut self, dx: f32, dy: f32, sensitivity: f32) {
+        self.yaw   -= dx * sensitivity;
+        self.pitch  = (self.pitch - dy * sensitivity).clamp(-1.4, 1.4);
     }
 }
 
