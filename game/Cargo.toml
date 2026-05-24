@@ -16,7 +16,7 @@ glow   = "0.12"
 
 # UI
 egui      = "0.22"
-egui_glow = { version = "0.22", features = ["winit"] }
+egui_glow = "0.22"
 
 # Math
 nalgebra     = "0.32"
