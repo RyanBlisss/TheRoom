@@ -1,6 +1,7 @@
 use gl::types::*;
 use nalgebra_glm as glm;
 use std::ffi::CString;
+use tobj;
 
 pub struct Shader {
     pub id: u32,
@@ -188,6 +189,38 @@ pub fn build_box(min: glm::Vec3, max: glm::Vec3) -> (Vec<f32>, Vec<u32>) {
         indices.extend_from_slice(&[b,b+1,b+2, b,b+2,b+3]);
     }
     (verts, indices)
+}
+
+/// Try to load the first mesh from an OBJ file.
+/// Returns None if the file doesn't exist or can't be parsed.
+/// Vertex format: pos(3) + normal(3) + uv(2), single-indexed.
+pub fn load_obj_mesh(path: &str, color: glm::Vec3) -> Option<Mesh> {
+    let (models, _) = tobj::load_obj(path, &tobj::LoadOptions {
+        single_index: true,
+        triangulate:  true,
+        ..Default::default()
+    }).ok()?;
+
+    let model = models.into_iter().next()?;
+    let m = &model.mesh;
+    if m.positions.is_empty() { return None; }
+
+    let vertex_count = m.positions.len() / 3;
+    let mut verts = Vec::with_capacity(vertex_count * 8);
+    for i in 0..vertex_count {
+        let px = m.positions[i*3];
+        let py = m.positions[i*3+1];
+        let pz = m.positions[i*3+2];
+        let (nx, ny, nz) = if m.normals.len() >= (i+1)*3 {
+            (m.normals[i*3], m.normals[i*3+1], m.normals[i*3+2])
+        } else { (0.0, 1.0, 0.0) };
+        let (u, v) = if m.texcoords.len() >= (i+1)*2 {
+            (m.texcoords[i*2], m.texcoords[i*2+1])
+        } else { (0.0, 0.0) };
+        verts.extend_from_slice(&[px, py, pz, nx, ny, nz, u, v]);
+    }
+
+    Some(Mesh::new(&verts, &m.indices, color))
 }
 
 /// Build a flat quad for a door opening (used as a coloured door plane).

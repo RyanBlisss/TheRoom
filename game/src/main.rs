@@ -65,7 +65,14 @@ struct PlayingState {
     selected_slot:  usize,
     cd_playing:     bool,
     cd_restore_acc: f32,
-    held_item:      Option<usize>, // index into items vec
+    held_item:      Option<usize>, // grabbed world item (index into items vec)
+    left_hand_slot: Option<usize>, // inventory index equipped to left hand
+    throw_charge:   f32,
+    throw_charging: bool,
+    hand_mesh:      Mesh,          // reused for rendering held/inventory items in view
+    player_model:   Option<Mesh>, // loaded from assets/models/player.obj when present
+    body_mesh:      Mesh,          // box fallback torso (shirt color)
+    leg_mesh:       Mesh,          // box fallback legs (pants color)
 }
 
 impl PlayingState {
@@ -99,6 +106,21 @@ impl PlayingState {
             Mesh::new(&v, &i, color)
         }).collect();
 
+        // Hand mesh — small box reused for rendering held/inventory items in hand view
+        let hs = ITEM_HALF_SIZE;
+        let (hv, hi) = renderer::build_box(glm::vec3(-hs,-hs,-hs), glm::vec3(hs,hs,hs));
+        let hand_mesh = Mesh::new(&hv, &hi, glm::vec3(0.8, 0.75, 0.65));
+
+        // Player body meshes — try OBJ first, fall back to boxes
+        let shirt = glm::vec3(character.shirt_color[0], character.shirt_color[1], character.shirt_color[2]);
+        let pants = glm::vec3(character.pants_color[0], character.pants_color[1], character.pants_color[2]);
+        let skin  = { let [r,g,b] = character.skin_tone.rgb(); glm::vec3(r, g, b) };
+        let player_model = renderer::load_obj_mesh("assets/models/player.obj", skin);
+        let (bv, bi) = renderer::build_box(glm::vec3(-0.16, 0.75, -0.10), glm::vec3(0.16, 1.30, 0.10));
+        let body_mesh = Mesh::new(&bv, &bi, shirt);
+        let (lv, li) = renderer::build_box(glm::vec3(-0.14, 0.00, -0.09), glm::vec3(0.14, 0.75, 0.09));
+        let leg_mesh  = Mesh::new(&lv, &li, pants);
+
         let aspect = w as f32 / h.max(1) as f32;
         Self {
             player:        Player::new(glm::vec3(0.0, world::FLOOR_1, 0.0)),
@@ -114,6 +136,13 @@ impl PlayingState {
             cd_playing:     false,
             cd_restore_acc: 0.0,
             held_item:      None,
+            left_hand_slot: None,
+            throw_charge:   0.0,
+            throw_charging: false,
+            hand_mesh,
+            player_model,
+            body_mesh,
+            leg_mesh,
         }
     }
 
@@ -123,8 +152,12 @@ impl PlayingState {
 
     fn try_grab(&mut self) {
         if self.held_item.is_some() {
-            // Already holding something — bag it
             self.bag_held();
+            return;
+        }
+        // Right hand occupied by an inventory item — must free it first
+        if self.inventory.items.get(self.selected_slot).is_some() {
+            self.show_msg("Free your hands first. (deselect or drop)");
             return;
         }
         let eye   = self.player.eye_position();
@@ -168,14 +201,22 @@ impl PlayingState {
 
     fn throw_held(&mut self) {
         if let Some(idx) = self.held_item.take() {
-            let fwd = self.player.forward_3d();
+            let charge = self.throw_charge.max(0.08); // minimum flick even on tap
+            let speed  = 4.0 + charge * 14.0;        // 4 m/s flick → 18 m/s full charge
+            let fwd    = self.player.forward_3d();
+
             let item = &mut self.items[idx];
-            item.vel_y   = fwd.y * 6.0 + 2.0;
-            item.landed  = false;
-            // Horizontal throw impulse stored on the item — we'll apply it in physics
-            // For simplicity: just fling it by offsetting position + giving vel_y a boost
-            item.position = self.player.eye_position() + fwd * 0.6;
-            self.show_msg("Thrown.");
+            item.position = self.player.eye_position() + fwd * 0.7;
+            item.vel_x    = fwd.x * speed;
+            item.vel_y    = fwd.y * speed + 1.5; // slight upward arc
+            item.vel_z    = fwd.z * speed;
+            item.landed   = false;
+
+            self.throw_charge   = 0.0;
+            self.throw_charging = false;
+
+            let label = if charge > 0.7 { "HURLED!" } else if charge > 0.3 { "Thrown." } else { "Tossed." };
+            self.show_msg(label);
         }
     }
 
@@ -287,7 +328,7 @@ impl PlayingState {
         }
     }
 
-    fn update(&mut self, keys: &HashSet<VirtualKeyCode>, dt: f32) {
+    fn update(&mut self, keys: &HashSet<VirtualKeyCode>, dt: f32, fly_cam: bool) {
         self.sanity.tick(dt);
 
         if self.cd_playing {
@@ -300,7 +341,7 @@ impl PlayingState {
         }
 
         self.audio.tick_heartbeat(self.sanity.insanity(), dt);
-        self.player.update(keys, dt, &self.world.walls, Some(&self.world.stairs));
+        self.player.update(keys, dt, &self.world.walls, Some(&self.world.stairs), fly_cam);
 
         for item in &mut self.items {
             let floor_y = if item.position.y > world::FLOOR_2 - 0.5 {
@@ -309,6 +350,13 @@ impl PlayingState {
                 world::FLOOR_1
             };
             item.physics_tick(dt, floor_y);
+        }
+
+        // Throw charge — accumulates while R is held with an item
+        if self.throw_charging && self.held_item.is_some() {
+            self.throw_charge = (self.throw_charge + dt * 0.9).min(1.0);
+        } else if !self.throw_charging {
+            self.throw_charge = 0.0;
         }
 
         // Keep held item floating in front of camera
@@ -505,7 +553,18 @@ impl App {
             } => {
                 match ks {
                     ElementState::Pressed  => { self.keys.insert(*key); }
-                    ElementState::Released => { self.keys.remove(key); }
+                    ElementState::Released => {
+                        self.keys.remove(key);
+                        // R release = throw with accumulated charge
+                        if *key == VirtualKeyCode::R {
+                            if let Some(g) = &mut self.game {
+                                if g.throw_charging {
+                                    g.throw_charging = false;
+                                    g.throw_held();
+                                }
+                            }
+                        }
+                    }
                 }
                 if *ks == ElementState::Pressed {
                     self.on_key(*key, window);
@@ -515,7 +574,8 @@ impl App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left, ..
             } => {
-                if self.phase == GamePhase::Playing && !self.inventory_open {
+                // Don't recapture when dev mode is open — cursor must stay free
+                if self.phase == GamePhase::Playing && !self.inventory_open && !self.devmode.active {
                     self.capture(window, true);
                 }
             }
@@ -589,15 +649,45 @@ impl App {
                 }
                 VirtualKeyCode::F2 => {
                     self.devmode.toggle();
-                    // Dev mode pauses mouse capture so UI is usable
-                    self.capture(window, !self.devmode.active);
+                    if self.devmode.active {
+                        // Enter dev mode: free the mouse, enable fly cam
+                        self.capture(window, false);
+                        self.fly_cam = true;
+                        self.devmode.fly_cam = true;
+                    } else {
+                        // Exit dev mode: recapture mouse, disable fly cam
+                        self.fly_cam = false;
+                        self.devmode.fly_cam = false;
+                        self.capture(window, true);
+                    }
                 }
                 VirtualKeyCode::Tab => {
                     self.inventory_open = !self.inventory_open;
                     self.capture(window, !self.inventory_open);
                 }
                 VirtualKeyCode::G => { if let Some(g) = &mut self.game { g.try_grab(); } }
-                VirtualKeyCode::R => { if let Some(g) = &mut self.game { g.throw_held(); } }
+                VirtualKeyCode::Q => {
+                    if let Some(g) = &mut self.game {
+                        if g.left_hand_slot.is_some() {
+                            g.left_hand_slot = None;
+                            g.show_msg("Left hand empty.");
+                        } else if g.inventory.items.get(g.selected_slot).is_some() {
+                            g.left_hand_slot = Some(g.selected_slot);
+                            g.show_msg("Item readied in left hand.");
+                        } else {
+                            g.show_msg("Nothing to hold.");
+                        }
+                    }
+                }
+                VirtualKeyCode::R => {
+                    if let Some(g) = &mut self.game {
+                        if g.held_item.is_some() {
+                            g.throw_charging = true;
+                        } else {
+                            g.try_grab(); // R = grab when hands empty
+                        }
+                    }
+                }
                 VirtualKeyCode::E => {
                     if let Some(g) = &mut self.game {
                         if g.held_item.is_some() { g.bag_held(); } else { g.try_interact(); }
@@ -622,7 +712,14 @@ impl App {
     }
 
     fn on_mouse_motion(&mut self, dx: f64, dy: f64) {
-        if self.mouse_captured && !self.inventory_open {
+        // In dev mode: look only while right mouse button is held (free cursor otherwise)
+        // In normal play: look whenever mouse is captured
+        let should_look = if self.devmode.active {
+            self.keys.contains(&VirtualKeyCode::LControl) // hold Ctrl to look in dev mode
+        } else {
+            self.mouse_captured && !self.inventory_open
+        };
+        if should_look {
             if let Some(g) = &mut self.game {
                 g.player.apply_mouse(dx as f32, dy as f32, self.settings.mouse_sensitivity);
             }
@@ -647,9 +744,10 @@ impl App {
         self.network.tick();
 
         if self.phase == GamePhase::Playing {
-            let keys = self.keys.clone();
+            let keys     = self.keys.clone();
+            let fly_cam  = self.fly_cam;
             if let Some(g) = &mut self.game {
-                g.update(&keys, dt);
+                g.update(&keys, dt, fly_cam);
             }
         }
     }
@@ -931,6 +1029,50 @@ impl App {
             self.shader.set_vec3("objectColor", &g.item_meshes[i].color);
             g.item_meshes[i].draw();
         }
+
+        // ── Player body — rotates with yaw, OBJ if available else box fallback ─
+        let body_mat = glm::translation(&g.player.position)
+            * glm::rotation(g.player.yaw, &glm::vec3(0.0f32, 1.0, 0.0));
+        self.shader.set_mat4("model", &body_mat);
+        if let Some(m) = &g.player_model {
+            self.shader.set_vec3("objectColor", &m.color);
+            m.draw();
+        } else {
+            self.shader.set_vec3("objectColor", &g.body_mesh.color);
+            g.body_mesh.draw();
+            self.shader.set_vec3("objectColor", &g.leg_mesh.color);
+            g.leg_mesh.draw();
+        }
+
+        // ── Right-hand view: inventory item shown when no world item held ─────
+        if g.held_item.is_none() {
+            if let Some(kind) = g.inventory.items.get(g.selected_slot) {
+                let color    = item_color(kind);
+                let eye      = g.player.eye_position();
+                let fwd      = g.player.forward_3d();
+                let right    = g.player.right_xz();
+                let up       = glm::vec3(0.0f32, 1.0, 0.0);
+                let hand_pos = eye + fwd * 0.50 + right * 0.22 - up * 0.20;
+                self.shader.set_mat4("model", &glm::translation(&hand_pos));
+                self.shader.set_vec3("objectColor", &color);
+                g.hand_mesh.draw();
+            }
+        }
+
+        // ── Left-hand view: item equipped via Q ───────────────────────────────
+        if let Some(slot) = g.left_hand_slot {
+            if let Some(kind) = g.inventory.items.get(slot) {
+                let color    = item_color(kind);
+                let eye      = g.player.eye_position();
+                let fwd      = g.player.forward_3d();
+                let right    = g.player.right_xz();
+                let up       = glm::vec3(0.0f32, 1.0, 0.0);
+                let hand_pos = eye + fwd * 0.50 - right * 0.22 - up * 0.20;
+                self.shader.set_mat4("model", &glm::translation(&hand_pos));
+                self.shader.set_vec3("objectColor", &color);
+                g.hand_mesh.draw();
+            }
+        }
     }
 
     // ── egui panels ──────────────────────────────────────────────────────
@@ -940,24 +1082,25 @@ impl App {
         let msg      = self.game.as_ref().and_then(|g| g.message.as_ref()).map(|(m,_)| m.clone());
         let sel      = self.game.as_ref().map(|g| g.selected_slot).unwrap_or(0);
         let inv: Vec<ItemKind> = self.game.as_ref().map(|g| g.inventory.items.clone()).unwrap_or_default();
-        let room_name = self.game.as_ref().map(|g| g.world.room_name_at(&g.player.position)).unwrap_or("");
-        let fps      = self.fps;
-        let show_fps = self.settings.show_fps;
+        let room_name    = self.game.as_ref().map(|g| g.world.room_name_at(&g.player.position)).unwrap_or("");
+        let fps          = self.fps;
+        let show_fps     = self.settings.show_fps;
+        let throw_charge = self.game.as_ref().map(|g| if g.throw_charging { g.throw_charge } else { -1.0 }).unwrap_or(-1.0);
 
         let raw = self.take_raw_input();
         let out = self.egui_ctx.run(raw, |ctx| {
-            // ── Sanity vignette overlay ───────────────────────────────────
+            // ── Sanity vignette — only below 35% sanity, subtle frame ────
             let insanity = 1.0 - sanity;
-            if insanity > 0.05 {
+            let vignette_t = ((insanity - 0.65) / 0.35).clamp(0.0, 1.0); // 0 at 35% sanity, 1 at 0%
+            if vignette_t > 0.01 {
                 egui::Area::new("vignette")
                     .anchor(egui::Align2::LEFT_TOP, [0.0, 0.0])
                     .show(ctx, |ui| {
                         let screen = ctx.screen_rect();
                         let p = ui.painter();
-                        let alpha = (insanity * insanity * 210.0) as u8;
-                        let col = egui::Color32::from_rgba_premultiplied(90, 0, 10, alpha);
-                        let edge = screen.width().min(screen.height()) * 0.30;
-                        // Four edge strips — darkness closing in
+                        let alpha = (vignette_t * vignette_t * 95.0) as u8;
+                        let col = egui::Color32::from_rgba_premultiplied(80, 0, 8, alpha);
+                        let edge = screen.width().min(screen.height()) * 0.18;
                         p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + edge)), 0.0, col);
                         p.rect_filled(egui::Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - edge), screen.max), 0.0, col);
                         p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.min.x + edge, screen.max.y)), 0.0, col);
@@ -1019,6 +1162,18 @@ impl App {
                     });
                 });
 
+            // ── Throw charge bar ──────────────────────────────────────────
+            if throw_charge >= 0.0 {
+                egui::Area::new("throw_charge")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
+                    .show(ctx, |ui| {
+                        let col = if throw_charge > 0.75 { egui::Color32::from_rgb(240, 80, 50) }
+                                  else if throw_charge > 0.4 { egui::Color32::from_rgb(230, 175, 50) }
+                                  else { egui::Color32::from_rgb(120, 200, 120) };
+                        ui.add(egui::ProgressBar::new(throw_charge).desired_width(120.0).fill(col));
+                    });
+            }
+
             // ── Message ───────────────────────────────────────────────────
             if let Some(m) = &msg {
                 egui::Area::new("msg")
@@ -1040,7 +1195,7 @@ impl App {
             egui::Area::new("hint")
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new("E Interact  G Grab  R Throw  F Use  Tab Inventory  Esc Pause")
+                    ui.label(egui::RichText::new("E Interact  G/R Grab  R Throw  F Use  Q Left hand  Tab Inventory  Esc Pause")
                         .size(10.0).color(egui::Color32::from_gray(35)));
                 });
         });
