@@ -73,6 +73,7 @@ struct PlayingState {
     player_model:   Option<Mesh>, // loaded from assets/models/player.obj when present
     body_mesh:      Mesh,          // box fallback torso (shirt color)
     leg_mesh:       Mesh,          // box fallback legs (pants color)
+    props:          Vec<(Mesh, glm::Mat4)>, // static furniture: (mesh, model matrix)
 }
 
 impl PlayingState {
@@ -102,8 +103,17 @@ impl PlayingState {
 
         let item_meshes = items.iter().map(|item| {
             let color = item_color(&item.kind);
-            let (v, i) = renderer::build_box(glm::vec3(-s,-s,-s), glm::vec3(s,s,s));
-            Mesh::new(&v, &i, color)
+            let obj = match &item.kind {
+                ItemKind::Key { .. }  => renderer::load_obj_mesh("assets/models/key.obj",          color),
+                ItemKind::SanityPill  => renderer::load_obj_mesh("assets/models/pill.obj",         color),
+                ItemKind::WindUpToy   => renderer::load_obj_mesh("assets/models/wind_up_toy.obj",  color),
+                ItemKind::Cd          => renderer::load_obj_mesh("assets/models/cd.obj",           color),
+                ItemKind::CdPlayer    => renderer::load_obj_mesh("assets/models/cd_player.obj",    color),
+            };
+            obj.unwrap_or_else(|| {
+                let (v, i) = renderer::build_box(glm::vec3(-s,-s,-s), glm::vec3(s,s,s));
+                Mesh::new(&v, &i, color)
+            })
         }).collect();
 
         // Hand mesh — small box reused for rendering held/inventory items in hand view
@@ -120,6 +130,41 @@ impl PlayingState {
         let body_mesh = Mesh::new(&bv, &bi, shirt);
         let (lv, li) = renderer::build_box(glm::vec3(-0.14, 0.00, -0.09), glm::vec3(0.14, 0.75, 0.09));
         let leg_mesh  = Mesh::new(&lv, &li, pants);
+
+        // Furniture props — (mesh, model_matrix)
+        let wood   = glm::vec3(0.55_f32, 0.38, 0.22);
+        let fabric = glm::vec3(0.62_f32, 0.55, 0.48);
+        let prop_defs: &[(&str, glm::Vec3, glm::Vec3, f32)] = &[
+            // (obj, color, pos, yaw_degrees)
+            // Main room
+            ("assets/models/table.obj", wood,   glm::vec3( 2.5, world::FLOOR_1,  1.5),   0.0),
+            ("assets/models/chair.obj", fabric, glm::vec3( 2.5, world::FLOOR_1,  3.2),   0.0),
+            ("assets/models/chair.obj", fabric, glm::vec3( 2.5, world::FLOOR_1, -0.2), 180.0),
+            // Bedroom A
+            ("assets/models/bed.obj",   fabric, glm::vec3( 2.0, world::FLOOR_1,  7.5),  90.0),
+            ("assets/models/table.obj", wood,   glm::vec3(-1.0, world::FLOOR_1,  7.5),   0.0),
+            // Bedroom B
+            ("assets/models/bed.obj",   fabric, glm::vec3( 8.0, world::FLOOR_1,  7.5), -90.0),
+            // Dining room
+            ("assets/models/table.obj", wood,   glm::vec3( 9.5, world::FLOOR_1,-10.0),   0.0),
+            ("assets/models/chair.obj", fabric, glm::vec3( 9.5, world::FLOOR_1, -8.2),   0.0),
+            ("assets/models/chair.obj", fabric, glm::vec3( 9.5, world::FLOOR_1,-11.8), 180.0),
+            // Kitchen
+            ("assets/models/table.obj", wood,   glm::vec3(-8.0, world::FLOOR_1,-10.0),   0.0),
+            // Floor 2 bedroom A
+            ("assets/models/bed.obj",   fabric, glm::vec3( 2.0, world::FLOOR_2,  7.5),  90.0),
+            // Floor 2 bedroom B
+            ("assets/models/bed.obj",   fabric, glm::vec3( 8.0, world::FLOOR_2,  7.5), -90.0),
+        ];
+        let mut props: Vec<(Mesh, glm::Mat4)> = prop_defs.iter().map(|(path, color, pos, yaw_deg)| {
+            let mesh = renderer::load_obj_mesh(path, *color).unwrap_or_else(|| {
+                let (v,i) = renderer::build_box(glm::vec3(-0.3, 0.0,-0.3), glm::vec3(0.3, 0.8, 0.3));
+                Mesh::new(&v, &i, *color)
+            });
+            let mat = glm::translation(pos)
+                * glm::rotation(yaw_deg.to_radians(), &glm::vec3(0.0f32, 1.0, 0.0));
+            (mesh, mat)
+        }).collect();
 
         let aspect = w as f32 / h.max(1) as f32;
         Self {
@@ -143,6 +188,7 @@ impl PlayingState {
             player_model,
             body_mesh,
             leg_mesh,
+            props,
         }
     }
 
@@ -1022,6 +1068,12 @@ impl App {
             self.shader.set_vec3("objectColor", &dm.mesh.color);
             dm.mesh.draw();
         }
+        for (mesh, mat) in &g.props {
+            self.shader.set_mat4("model", mat);
+            self.shader.set_vec3("objectColor", &mesh.color);
+            mesh.draw();
+        }
+
         for (i, item) in g.items.iter().enumerate() {
             if item.picked_up { continue; }
             let model = glm::translation(&item.position);
