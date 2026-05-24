@@ -332,14 +332,9 @@ impl App {
         }
 
         match event {
-            WindowEvent::Resized(size) => {
-                self.window_size = [size.width, size.height];
-                self.game_vp     = compute_game_viewport(size.width, size.height);
-                self.egui_scale  = window.scale_factor() as f32;
-                if let Some(g) = &mut self.game {
-                    let [_, _, vw, vh] = self.game_vp;
-                    g.projection = glm::perspective(vw as f32 / vh.max(1) as f32, self.settings.fov.to_radians(), 0.05, 200.0);
-                }
+            WindowEvent::Resized(_) => {
+                // window_size, game_vp, and projection are synced in render() each frame
+                self.egui_scale = window.scale_factor() as f32;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.egui_scale = *scale_factor as f32;
@@ -491,8 +486,23 @@ impl App {
     // ── Render ────────────────────────────────────────────────────────────
 
     fn render(&mut self, window: &glutin::window::Window) {
-        let [w, h] = self.window_size;
+        // Sync from actual window every frame — set_fullscreen is async on macOS
+        // and the Resized event may arrive a few frames late.
+        let phys = window.inner_size();
+        let w = phys.width;
+        let h = phys.height;
+        self.window_size = [w, h];
+        self.game_vp     = compute_game_viewport(w, h);
         let [vx, vy, vw, vh] = self.game_vp;
+
+        // Keep projection in sync with the actual game viewport aspect ratio
+        if let Some(g) = &mut self.game {
+            g.projection = glm::perspective(
+                vw as f32 / vh.max(1) as f32,
+                self.settings.fov.to_radians(), 0.05, 200.0,
+            );
+        }
+
         unsafe {
             // Black letterbox bars
             gl::Viewport(0, 0, w as i32, h as i32);
