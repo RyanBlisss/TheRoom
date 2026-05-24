@@ -65,9 +65,14 @@ struct PlayingState {
     selected_slot:  usize,
     cd_playing:     bool,
     cd_restore_acc: f32,
-    held_item:      Option<usize>, // index into items vec
-    throw_charge:   f32,          // 0..1, builds while R is held
+    held_item:      Option<usize>, // grabbed world item (index into items vec)
+    left_hand_slot: Option<usize>, // inventory index equipped to left hand
+    throw_charge:   f32,
     throw_charging: bool,
+    hand_mesh:      Mesh,          // reused for rendering held/inventory items in view
+    player_model:   Option<Mesh>, // loaded from assets/models/player.obj when present
+    body_mesh:      Mesh,          // box fallback torso (shirt color)
+    leg_mesh:       Mesh,          // box fallback legs (pants color)
 }
 
 impl PlayingState {
@@ -101,6 +106,21 @@ impl PlayingState {
             Mesh::new(&v, &i, color)
         }).collect();
 
+        // Hand mesh — small box reused for rendering held/inventory items in hand view
+        let hs = ITEM_HALF_SIZE;
+        let (hv, hi) = renderer::build_box(glm::vec3(-hs,-hs,-hs), glm::vec3(hs,hs,hs));
+        let hand_mesh = Mesh::new(&hv, &hi, glm::vec3(0.8, 0.75, 0.65));
+
+        // Player body meshes — try OBJ first, fall back to boxes
+        let shirt = glm::vec3(character.shirt_color[0], character.shirt_color[1], character.shirt_color[2]);
+        let pants = glm::vec3(character.pants_color[0], character.pants_color[1], character.pants_color[2]);
+        let skin  = { let [r,g,b] = character.skin_tone.rgb(); glm::vec3(r, g, b) };
+        let player_model = renderer::load_obj_mesh("assets/models/player.obj", skin);
+        let (bv, bi) = renderer::build_box(glm::vec3(-0.16, 0.75, -0.10), glm::vec3(0.16, 1.30, 0.10));
+        let body_mesh = Mesh::new(&bv, &bi, shirt);
+        let (lv, li) = renderer::build_box(glm::vec3(-0.14, 0.00, -0.09), glm::vec3(0.14, 0.75, 0.09));
+        let leg_mesh  = Mesh::new(&lv, &li, pants);
+
         let aspect = w as f32 / h.max(1) as f32;
         Self {
             player:        Player::new(glm::vec3(0.0, world::FLOOR_1, 0.0)),
@@ -116,8 +136,13 @@ impl PlayingState {
             cd_playing:     false,
             cd_restore_acc: 0.0,
             held_item:      None,
+            left_hand_slot: None,
             throw_charge:   0.0,
             throw_charging: false,
+            hand_mesh,
+            player_model,
+            body_mesh,
+            leg_mesh,
         }
     }
 
@@ -127,8 +152,12 @@ impl PlayingState {
 
     fn try_grab(&mut self) {
         if self.held_item.is_some() {
-            // Already holding something — bag it
             self.bag_held();
+            return;
+        }
+        // Right hand occupied by an inventory item — must free it first
+        if self.inventory.items.get(self.selected_slot).is_some() {
+            self.show_msg("Free your hands first. (deselect or drop)");
             return;
         }
         let eye   = self.player.eye_position();
@@ -637,10 +666,25 @@ impl App {
                     self.capture(window, !self.inventory_open);
                 }
                 VirtualKeyCode::G => { if let Some(g) = &mut self.game { g.try_grab(); } }
+                VirtualKeyCode::Q => {
+                    if let Some(g) = &mut self.game {
+                        if g.left_hand_slot.is_some() {
+                            g.left_hand_slot = None;
+                            g.show_msg("Left hand empty.");
+                        } else if g.inventory.items.get(g.selected_slot).is_some() {
+                            g.left_hand_slot = Some(g.selected_slot);
+                            g.show_msg("Item readied in left hand.");
+                        } else {
+                            g.show_msg("Nothing to hold.");
+                        }
+                    }
+                }
                 VirtualKeyCode::R => {
                     if let Some(g) = &mut self.game {
                         if g.held_item.is_some() {
-                            g.throw_charging = true; // start charge on press
+                            g.throw_charging = true;
+                        } else {
+                            g.try_grab(); // R = grab when hands empty
                         }
                     }
                 }
@@ -985,6 +1029,50 @@ impl App {
             self.shader.set_vec3("objectColor", &g.item_meshes[i].color);
             g.item_meshes[i].draw();
         }
+
+        // ── Player body — rotates with yaw, OBJ if available else box fallback ─
+        let body_mat = glm::translation(&g.player.position)
+            * glm::rotation(g.player.yaw, &glm::vec3(0.0f32, 1.0, 0.0));
+        self.shader.set_mat4("model", &body_mat);
+        if let Some(m) = &g.player_model {
+            self.shader.set_vec3("objectColor", &m.color);
+            m.draw();
+        } else {
+            self.shader.set_vec3("objectColor", &g.body_mesh.color);
+            g.body_mesh.draw();
+            self.shader.set_vec3("objectColor", &g.leg_mesh.color);
+            g.leg_mesh.draw();
+        }
+
+        // ── Right-hand view: inventory item shown when no world item held ─────
+        if g.held_item.is_none() {
+            if let Some(kind) = g.inventory.items.get(g.selected_slot) {
+                let color    = item_color(kind);
+                let eye      = g.player.eye_position();
+                let fwd      = g.player.forward_3d();
+                let right    = g.player.right_xz();
+                let up       = glm::vec3(0.0f32, 1.0, 0.0);
+                let hand_pos = eye + fwd * 0.50 + right * 0.22 - up * 0.20;
+                self.shader.set_mat4("model", &glm::translation(&hand_pos));
+                self.shader.set_vec3("objectColor", &color);
+                g.hand_mesh.draw();
+            }
+        }
+
+        // ── Left-hand view: item equipped via Q ───────────────────────────────
+        if let Some(slot) = g.left_hand_slot {
+            if let Some(kind) = g.inventory.items.get(slot) {
+                let color    = item_color(kind);
+                let eye      = g.player.eye_position();
+                let fwd      = g.player.forward_3d();
+                let right    = g.player.right_xz();
+                let up       = glm::vec3(0.0f32, 1.0, 0.0);
+                let hand_pos = eye + fwd * 0.50 - right * 0.22 - up * 0.20;
+                self.shader.set_mat4("model", &glm::translation(&hand_pos));
+                self.shader.set_vec3("objectColor", &color);
+                g.hand_mesh.draw();
+            }
+        }
     }
 
     // ── egui panels ──────────────────────────────────────────────────────
@@ -1107,7 +1195,7 @@ impl App {
             egui::Area::new("hint")
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new("E Interact  G Grab  R Throw  F Use  Tab Inventory  Esc Pause")
+                    ui.label(egui::RichText::new("E Interact  G/R Grab  R Throw  F Use  Q Left hand  Tab Inventory  Esc Pause")
                         .size(10.0).color(egui::Color32::from_gray(35)));
                 });
         });
