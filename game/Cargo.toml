@@ -37,3 +37,9 @@ rand = "0.8"
 
 # Time
 instant = "0.1"
+
+# Lua scripting
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
+
+# OBJ model loading
+tobj = "4.0"

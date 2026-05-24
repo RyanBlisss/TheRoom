@@ -1,13 +1,18 @@
 mod audio;
 mod character;
+mod devmode;
 mod game_phase;
 mod items;
 mod network;
 mod player;
 mod renderer;
 mod sanity;
+mod scripting;
 mod settings;
 mod world;
+
+use devmode::{DevCmd, DevMode, ItemInfo, RoomInfo};
+use scripting::{GameEvent, ScriptEngine};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,18 +53,19 @@ const CROSS_FRAG_SRC: &str = include_str!("shaders/crosshair.frag");
 // ─── PlayingState ─────────────────────────────────────────────────────────────
 
 struct PlayingState {
-    player:        Player,
-    world:         World,
-    sanity:        Sanity,
-    inventory:     Inventory,
-    items:         Vec<Item>,
-    item_meshes:   Vec<Mesh>,
-    audio:         AudioManager,
-    message:       Option<(String, Instant)>,
-    projection:    glm::Mat4,
-    selected_slot: usize,
-    cd_playing:    bool,
+    player:         Player,
+    world:          World,
+    sanity:         Sanity,
+    inventory:      Inventory,
+    items:          Vec<Item>,
+    item_meshes:    Vec<Mesh>,
+    audio:          AudioManager,
+    message:        Option<(String, Instant)>,
+    projection:     glm::Mat4,
+    selected_slot:  usize,
+    cd_playing:     bool,
     cd_restore_acc: f32,
+    held_item:      Option<usize>, // index into items vec
 }
 
 impl PlayingState {
@@ -107,11 +113,70 @@ impl PlayingState {
             selected_slot:  0,
             cd_playing:     false,
             cd_restore_acc: 0.0,
+            held_item:      None,
         }
     }
 
     fn show_msg(&mut self, msg: impl Into<String>) {
         self.message = Some((msg.into(), Instant::now()));
+    }
+
+    fn try_grab(&mut self) {
+        if self.held_item.is_some() {
+            // Already holding something — bag it
+            self.bag_held();
+            return;
+        }
+        let eye   = self.player.eye_position();
+        let range = self.player.interact_range;
+        let fwd   = self.player.forward_3d();
+        // Find nearest pickupable item in front of player
+        let mut best: Option<(usize, f32)> = None;
+        for (i, item) in self.items.iter().enumerate() {
+            if item.picked_up { continue; }
+            if !item.pickupable { continue; }
+            let dist = glm::distance(&eye, &item.position);
+            if dist > range { continue; }
+            // Prefer items roughly in the look direction
+            let dir_to = glm::normalize(&(item.position - eye));
+            if glm::dot(&dir_to, &fwd) < 0.3 { continue; }
+            if best.map_or(true, |(_, d)| dist < d) {
+                best = Some((i, dist));
+            }
+        }
+        if let Some((idx, _)) = best {
+            self.held_item = Some(idx);
+            self.show_msg("Holding — E to bag, R to throw");
+        } else {
+            self.show_msg("Nothing to grab.");
+        }
+    }
+
+    fn bag_held(&mut self) {
+        if let Some(idx) = self.held_item.take() {
+            let item = &mut self.items[idx];
+            item.picked_up = true;
+            let kind = item.kind.clone();
+            let label = item.label;
+            if matches!(kind, ItemKind::SanityPill) {
+                self.audio.play_pill_pickup();
+            }
+            self.inventory.add(kind);
+            self.show_msg(format!("Bagged: {}", label));
+        }
+    }
+
+    fn throw_held(&mut self) {
+        if let Some(idx) = self.held_item.take() {
+            let fwd = self.player.forward_3d();
+            let item = &mut self.items[idx];
+            item.vel_y   = fwd.y * 6.0 + 2.0;
+            item.landed  = false;
+            // Horizontal throw impulse stored on the item — we'll apply it in physics
+            // For simplicity: just fling it by offsetting position + giving vel_y a boost
+            item.position = self.player.eye_position() + fwd * 0.6;
+            self.show_msg("Thrown.");
+        }
     }
 
     fn shuffle_items(&mut self) {
@@ -246,6 +311,16 @@ impl PlayingState {
             item.physics_tick(dt, floor_y);
         }
 
+        // Keep held item floating in front of camera
+        if let Some(idx) = self.held_item {
+            let eye   = self.player.eye_position();
+            let fwd   = self.player.forward_3d();
+            let right = self.player.right_xz();
+            let hold_pos = eye + fwd * 0.8 + right * (-0.25) + glm::vec3(0.0, -0.18, 0.0);
+            self.items[idx].position = hold_pos;
+            self.items[idx].landed   = true; // stop physics while held
+        }
+
         if let Some((_, t)) = &self.message {
             if t.elapsed().as_secs_f32() > 3.0 {
                 self.message = None;
@@ -286,6 +361,9 @@ struct App {
     fps:            f32,
     fps_accum:      f32,
     fps_frames:     u32,
+    devmode:        DevMode,
+    scripts:        Option<ScriptEngine>,
+    fly_cam:        bool,
 }
 
 impl App {
@@ -341,6 +419,9 @@ impl App {
             fps:            0.0,
             fps_accum:      0.0,
             fps_frames:     0,
+            devmode:        DevMode::default(),
+            scripts:        ScriptEngine::new().map(|mut e| { e.load_scripts(); e }).ok(),
+            fly_cam:        false,
         }
     }
 
@@ -506,11 +587,22 @@ impl App {
                     self.inventory_open = false;
                     self.phase = GamePhase::Paused;
                 }
+                VirtualKeyCode::F2 => {
+                    self.devmode.toggle();
+                    // Dev mode pauses mouse capture so UI is usable
+                    self.capture(window, !self.devmode.active);
+                }
                 VirtualKeyCode::Tab => {
                     self.inventory_open = !self.inventory_open;
                     self.capture(window, !self.inventory_open);
                 }
-                VirtualKeyCode::E => { if let Some(g) = &mut self.game { g.try_interact(); } }
+                VirtualKeyCode::G => { if let Some(g) = &mut self.game { g.try_grab(); } }
+                VirtualKeyCode::R => { if let Some(g) = &mut self.game { g.throw_held(); } }
+                VirtualKeyCode::E => {
+                    if let Some(g) = &mut self.game {
+                        if g.held_item.is_some() { g.bag_held(); } else { g.try_interact(); }
+                    }
+                }
                 VirtualKeyCode::F => { if let Some(g) = &mut self.game { g.use_selected(); } }
                 VirtualKeyCode::Key1 => set_slot(&mut self.game, 0),
                 VirtualKeyCode::Key2 => set_slot(&mut self.game, 1),
@@ -605,6 +697,147 @@ impl App {
         }
     }
 
+    fn apply_script_cmds(&mut self, cmds: Vec<scripting::ScriptCmd>) {
+        for cmd in cmds {
+            match cmd {
+                scripting::ScriptCmd::ShowMessage(m) => {
+                    if let Some(g) = &mut self.game { g.show_msg(m); }
+                }
+                scripting::ScriptCmd::SetRoomColor { room_id, r, g: gv, b } => {
+                    if let Some(game) = &mut self.game {
+                        if let Some(room) = game.world.rooms.iter_mut().find(|r| r.id == room_id) {
+                            room.color = glm::vec3(r, gv, b);
+                            let (v, i) = renderer::build_box(room.min, room.max);
+                            room.mesh = renderer::Mesh::new(&v, &i, room.color);
+                        }
+                    }
+                }
+                scripting::ScriptCmd::SetSanity(v) => {
+                    if let Some(g) = &mut self.game { g.sanity.current = v; }
+                }
+                scripting::ScriptCmd::SpawnItem { kind, x, y, z } => {
+                    if let Some(game) = &mut self.game {
+                        let s = ITEM_HALF_SIZE;
+                        let pos = glm::vec3(x, y, z);
+                        let item = match kind.as_str() {
+                            "SanityPill" => Some(items::Item::pill(pos)),
+                            "WindUpToy"  => Some(items::Item::wind_up_toy(pos)),
+                            "Cd"         => Some(items::Item::cd(pos)),
+                            _            => None,
+                        };
+                        if let Some(it) = item {
+                            let color = item_color(&it.kind);
+                            let (v, i) = renderer::build_box(glm::vec3(-s,-s,-s), glm::vec3(s,s,s));
+                            game.item_meshes.push(renderer::Mesh::new(&v, &i, color));
+                            game.items.push(it);
+                        }
+                    }
+                }
+                scripting::ScriptCmd::MoveItem { label, x, y, z } => {
+                    if let Some(game) = &mut self.game {
+                        if let Some(item) = game.items.iter_mut().find(|i| i.label == label) {
+                            item.position = glm::vec3(x, y, z);
+                        }
+                    }
+                }
+                scripting::ScriptCmd::PlaySound(_path) => {
+                    // Future: play arbitrary sound file
+                }
+            }
+        }
+    }
+
+    fn apply_dev_cmds(&mut self, cmds: Vec<DevCmd>) {
+        for cmd in cmds {
+            match cmd {
+                DevCmd::MoveItem { idx, x, y, z } => {
+                    if let Some(g) = &mut self.game {
+                        if let Some(item) = g.items.get_mut(idx) {
+                            item.position = glm::vec3(x, y, z);
+                            item.landed = false;
+                        }
+                    }
+                }
+                DevCmd::SetRoomColor { idx, r, g: gv, b } => {
+                    if let Some(game) = &mut self.game {
+                        if let Some(room) = game.world.rooms.iter_mut().find(|r| r.id == idx) {
+                            room.color = glm::vec3(r, gv, b);
+                            let (v, i) = renderer::build_box(room.min, room.max);
+                            room.mesh = renderer::Mesh::new(&v, &i, room.color);
+                        }
+                    }
+                }
+                DevCmd::SpawnItem { kind, x, y, z } => {
+                    if let Some(game) = &mut self.game {
+                        let s = ITEM_HALF_SIZE;
+                        let pos = glm::vec3(x, y, z);
+                        let item = match kind.as_str() {
+                            "SanityPill" => Some(items::Item::pill(pos)),
+                            "WindUpToy"  => Some(items::Item::wind_up_toy(pos)),
+                            "Cd"         => Some(items::Item::cd(pos)),
+                            _            => None,
+                        };
+                        if let Some(it) = item {
+                            let color = item_color(&it.kind);
+                            let (v, i) = renderer::build_box(glm::vec3(-s,-s,-s), glm::vec3(s,s,s));
+                            game.item_meshes.push(renderer::Mesh::new(&v, &i, color));
+                            game.items.push(it);
+                            self.devmode.log(format!("Spawned {}", kind));
+                        }
+                    }
+                }
+                DevCmd::DeleteItem(idx) => {
+                    if let Some(game) = &mut self.game {
+                        if idx < game.items.len() {
+                            game.items.remove(idx);
+                            game.item_meshes.remove(idx);
+                        }
+                    }
+                }
+                DevCmd::RunScript(src) => {
+                    let (log_msg, script_cmds) = if let Some(engine) = &self.scripts {
+                        let msg = match engine.run_chunk(&src) {
+                            Ok(r)  => format!("= {}", r),
+                            Err(e) => format!("! {}", e),
+                        };
+                        let cmds = engine.drain_cmds();
+                        (msg, cmds)
+                    } else {
+                        ("! Script engine unavailable".to_string(), vec![])
+                    };
+                    self.devmode.log(log_msg);
+                    self.apply_script_cmds(script_cmds);
+                }
+                DevCmd::ReloadScripts => {
+                    if let Some(engine) = &mut self.scripts {
+                        engine.load_scripts();
+                        self.devmode.log("Scripts reloaded.".to_string());
+                    }
+                }
+                DevCmd::SaveLayout => {
+                    if let Some(game) = &self.game {
+                        let item_infos: Vec<ItemInfo> = game.items.iter().map(|it| ItemInfo {
+                            label: it.label.to_string(),
+                            picked_up: it.picked_up,
+                            x: it.position.x, y: it.position.y, z: it.position.z,
+                        }).collect();
+                        let room_infos: Vec<RoomInfo> = game.world.rooms.iter().map(|r| RoomInfo {
+                            id: r.id, name: r.name.to_string(),
+                            r: r.color.x, g: r.color.y, b: r.color.z,
+                        }).collect();
+                        let json = DevMode::layout_to_json(&item_infos, &room_infos);
+                        let _ = std::fs::write("layout.json", &json);
+                        self.devmode.log("Saved layout.json".to_string());
+                    }
+                }
+                DevCmd::ToggleFly => {
+                    self.fly_cam = !self.fly_cam;
+                    self.devmode.log(if self.fly_cam { "Fly cam ON" } else { "Fly cam OFF" }.to_string());
+                }
+            }
+        }
+    }
+
     fn render_playing(&mut self, window: &glutin::window::Window) {
         self.render_3d();
 
@@ -627,6 +860,37 @@ impl App {
         } else {
             self.render_inventory(window);
         }
+
+        // Dev overlay — rendered on top of everything
+        if self.devmode.active {
+            let item_infos: Vec<ItemInfo> = self.game.as_ref().map(|g| {
+                g.items.iter().map(|it| ItemInfo {
+                    label: it.label.to_string(),
+                    picked_up: it.picked_up,
+                    x: it.position.x, y: it.position.y, z: it.position.z,
+                }).collect()
+            }).unwrap_or_default();
+            let room_infos: Vec<RoomInfo> = self.game.as_ref().map(|g| {
+                g.world.rooms.iter().map(|r| RoomInfo {
+                    id: r.id, name: r.name.to_string(),
+                    r: r.color.x, g: r.color.y, b: r.color.z,
+                }).collect()
+            }).unwrap_or_default();
+            let scripts_list: Vec<String> = self.scripts.as_ref()
+                .map(|s| s.loaded_scripts().to_vec()).unwrap_or_default();
+            let player_pos = self.game.as_ref()
+                .map(|g| (g.player.position.x, g.player.position.y, g.player.position.z))
+                .unwrap_or_default();
+
+            let raw = self.take_raw_input();
+            let out = self.egui_ctx.run(raw, |ctx| {
+                self.devmode.render(ctx, &item_infos, &room_infos, &scripts_list, player_pos);
+            });
+            self.paint_egui(out);
+
+            let dev_cmds = self.devmode.drain_cmds();
+            self.apply_dev_cmds(dev_cmds);
+        }
     }
 
     fn render_3d(&mut self) {
@@ -645,7 +909,7 @@ impl App {
         self.shader.set_vec3("lightPos",   &glm::vec3(0.0_f32, 2.5, 0.0));
         self.shader.set_vec3("eyePos",     &eye);
         self.shader.set_vec3("lightColor", &glm::vec3(1.0_f32, 0.95, 0.85));
-        self.shader.set_float("ambientStrength", lerp(0.15, 0.55, g.sanity.normalised()));
+        self.shader.set_float("ambientStrength", lerp(0.10, 0.38, g.sanity.normalised()));
         self.shader.set_float("sanity",    g.sanity.normalised());
 
         let id: glm::Mat4 = glm::identity();
@@ -776,7 +1040,7 @@ impl App {
             egui::Area::new("hint")
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new("E Interact  F Use  Tab Inventory  Esc Pause")
+                    ui.label(egui::RichText::new("E Interact  G Grab  R Throw  F Use  Tab Inventory  Esc Pause")
                         .size(10.0).color(egui::Color32::from_gray(35)));
                 });
         });

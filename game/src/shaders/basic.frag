@@ -23,22 +23,22 @@ vec3 pointLight(vec3 lPos, vec3 lColor, float strength) {
 }
 
 void main() {
-    // Warm ambient fill — stylized hotels are readable, not caves
     vec3 ambient = ambientStrength * lightColor;
 
-    // Warm incandescent ceiling lamp
-    vec3 overhead = pointLight(lightPos, vec3(1.0, 0.90, 0.72), 5.5);
+    // Warm incandescent ceiling lamp — toned way down
+    vec3 overhead = pointLight(lightPos, vec3(1.0, 0.90, 0.72), 2.8);
 
-    // Player-local fill light — soft warm glow around the player
-    vec3 nearby = pointLight(eyePos, vec3(1.0, 0.96, 0.88), 2.8);
+    // Player proximity fill — subtle, just stops corners being pitch black
+    vec3 nearby = pointLight(eyePos, vec3(1.0, 0.96, 0.88), 1.4);
 
     vec3 result = (ambient + overhead + nearby) * objectColor;
-
-    // Slight toon quantization — groups shading into 4 bands for stylized look
-    float brightness = length(result);
-    float band = floor(brightness * 4.0) / 4.0;
-    result = result * (band / max(brightness, 0.001));
     result = clamp(result, 0.0, 1.0);
+
+    // Soft toon quantization — 6 bands so shading steps are gentler
+    float brightness = dot(result, vec3(0.333));
+    float band = floor(brightness * 6.0 + 0.5) / 6.0;
+    float blend = 0.65; // partial quantization — not fully flat
+    result = result * mix(1.0, band / max(brightness, 0.001), blend);
 
     // Sanity: at low sanity colours drain to cold sickly green-grey, then near-black
     float insanity = 1.0 - sanity;
