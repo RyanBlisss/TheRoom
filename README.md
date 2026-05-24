@@ -1,200 +1,345 @@
 # The Room
 
-**The Room** is a 2D atmospheric horror game built around sound, tension, shifting spaces, and psychological pressure.  
-The core experience is not just what the player sees, but what they hear.
+**The Room** is a 3D first-person atmospheric horror game built in Rust.  
+You are trapped in the Oceancrest Hotel. Every room you unlock makes the hotel worse. Find the keys. Manage your sanity. Survive.
 
-The player enters the Oceancrest Hotel expecting a peaceful vacation. Instead, the hotel becomes a living maze of locked rooms, distorted reality, hostile soundscapes, and a hunting entity that grows more dangerous over time.
+Audio is the primary mechanic. What you hear matters more than what you see.
 
 ---
 
 ## Table of Contents
 
+- [Building & Running](#building--running)
+- [Controls](#controls)
+- [Dev Mode](#dev-mode)
+- [Scripting (Lua)](#scripting-lua)
+- [Modding & Customization](#modding--customization)
 - [Game Concept](#game-concept)
-- [Core Design Pillars](#core-design-pillars)
 - [Gameplay Loop](#gameplay-loop)
-- [Main Objective](#main-objective)
-- [Room System](#room-system)
 - [Sanity System](#sanity-system)
 - [Monster System](#monster-system)
 - [Items](#items)
 - [Locations](#locations)
 - [Characters](#characters)
 - [Story](#story)
-- [Development Notes](#development-notes)
+- [Implementation Status](#implementation-status)
+
+---
+
+## Building & Running
+
+**Requirements:** Rust (stable), a GPU with OpenGL 3.3+
+
+```bash
+cd game
+cargo run --release
+```
+
+For development (faster compile, debug info):
+
+```bash
+cd game
+cargo build
+./target/debug/the_room
+```
+
+The game expects to be run from the `game/` directory so it can find `assets/` and `scripts/`.
+
+### Dependencies
+
+All managed by Cargo:
+
+| Crate | Purpose |
+|---|---|
+| `glutin` + `winit` | Window + OpenGL context |
+| `gl` + `glow` | OpenGL bindings |
+| `egui` + `egui_glow` | All UI (menus, HUD, dev mode) |
+| `nalgebra-glm` | 3D math |
+| `rodio` | Audio playback |
+| `mlua` | Lua 5.4 scripting engine |
+| `tobj` | OBJ model loading |
+| `serde` + `serde_json` | Settings, layout, character save |
+| `rand` | Item shuffle randomization |
+
+---
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `W A S D` | Move |
+| Mouse | Look |
+| `Space` | Jump |
+| `E` | Interact with door / item — or bag a held item |
+| `G` | Grab nearest item in front of you |
+| `R` | Throw held item |
+| `F` | Use selected hotbar item |
+| `1–5` | Select hotbar slot |
+| `Tab` | Open / close inventory |
+| `Esc` | Pause menu |
+| `F2` | Toggle dev mode |
+
+### Mouse sensitivity
+
+Adjust in **Settings** from the main menu or pause menu. The slider range is 0.0003–0.005.
+
+---
+
+## Dev Mode
+
+Press **F2** during gameplay to open the dev overlay. Mouse is released and the cursor becomes visible.
+
+The overlay has four tabs:
+
+### Items tab
+
+Lists every item currently in the world. Click an item to expand it:
+
+- Drag **X / Y / Z** sliders to move it in real time
+- Click **Delete** to remove it from the world
+- Use **Spawn Item** at the top to create a new SanityPill, WindUpToy, or CD at the origin
+
+### Rooms tab
+
+Lists all rooms with a color swatch. Click a room to expand it and drag **R / G / B** sliders to change its wall/floor/ceiling color live.
+
+### Scripts tab
+
+Shows which `.lua` files are currently loaded. At the bottom is a **Lua console** — type any Lua expression and press Enter or click **Run**. The result appears in the log above. Use this to call any scripting API function interactively.
+
+### Info tab
+
+Shows your current position, item and room counts, and a full keybinding reference.
+
+### Dev toolbar
+
+| Button | Action |
+|---|---|
+| **Fly ON/OFF** | Toggles fly camera — disables collision so you can move through walls and floors |
+| **Save Layout** | Writes all item positions and room colors to `layout.json` |
+| **Reload Scripts** | Hot-reloads all `.lua` files from `scripts/` without restarting |
+
+---
+
+## Scripting (Lua)
+
+On first run, a `scripts/` directory is created automatically with an `example.lua` starter file. Drop any `.lua` file in that folder and it will be loaded at game start. Use **Reload Scripts** in dev mode to reload without restarting.
+
+### Hooks
+
+Define these functions in your script to respond to game events:
+
+```lua
+function on_tick(dt)
+    -- Called every frame. dt = seconds since last frame.
+end
+
+function on_door_open(room_id)
+    -- Called when any locked door is unlocked.
+    -- room_id is the numeric ID of the room that was opened.
+end
+
+function on_item_pickup(label)
+    -- Called when the player bags an item.
+    -- label is a string like "Key", "Sanity Pill", "CD", etc.
+end
+
+function on_sanity_change(value)
+    -- Called every frame with current sanity (0.0 = gone, 1.0 = full).
+end
+
+function on_player_move(x, y, z)
+    -- Called every frame with player world position.
+end
+```
+
+### API
+
+```lua
+show_message("text")
+-- Display a message in the center-bottom HUD for 3 seconds.
+
+set_room_color(room_id, r, g, b)
+-- Change a room's color. Values are 0.0–1.0.
+-- Example: set_room_color(ROOM_MAIN, 0.8, 0.2, 0.2)
+
+spawn_item(kind, x, y, z)
+-- Spawn an item at a world position.
+-- kind: "SanityPill" | "WindUpToy" | "Cd"
+
+move_item(label, x, y, z)
+-- Move the first item matching label to a new position.
+
+set_sanity(value)
+-- Set current sanity directly. 0.0–1.0.
+
+play_sound(path)
+-- (Planned) Play a sound file from disk.
+```
+
+### Room ID constants
+
+Pre-defined in every script:
+
+```lua
+ROOM_MAIN      -- 0   Floor 1 starting room
+ROOM_BATH      -- 1   Floor 1 bathroom
+ROOM_BED_A     -- 2   Floor 1 bedroom A
+ROOM_BED_B     -- 3   Floor 1 bedroom B
+ROOM_HALL      -- 4   Floor 1 hall
+ROOM_KITCHEN   -- 5   Floor 1 kitchen
+ROOM_DINING    -- 6   Floor 1 dining room
+ROOM_F2_BATH   -- 7   Floor 2 bathroom
+ROOM_F2_BED_A  -- 8   Floor 2 bedroom A
+ROOM_F2_BED_B  -- 9   Floor 2 bedroom B
+ROOM_F2_HALL   -- 10  Floor 2 upper hall
+ROOM_THE_ROOM  -- 11  The final room
+```
+
+### Example script
+
+```lua
+-- Make the main room flash red when sanity drops below 25%
+function on_sanity_change(value)
+    if value < 0.25 then
+        set_room_color(ROOM_MAIN, 0.55, 0.08, 0.08)
+    else
+        set_room_color(ROOM_MAIN, 0.72, 0.62, 0.48)
+    end
+end
+
+-- Spawn a sanity pill every time a door is opened
+function on_door_open(room_id)
+    show_message("A door opens. Something shifts.")
+    spawn_item("SanityPill", 0.0, 1.0, 0.0)
+end
+```
+
+---
+
+## Modding & Customization
+
+### Asset overrides
+
+Place files in the following paths to override built-in assets:
+
+| Path | Overrides |
+|---|---|
+| `assets/sounds/ambient.ogg` | Ambient loop |
+| `assets/sounds/heartbeat.ogg` | Low-sanity heartbeat |
+| `assets/sounds/door_unlock.ogg` | Door unlock one-shot |
+| `assets/sounds/pill_pickup.ogg` | Pill pickup one-shot |
+| `assets/textures/wall.png` | Wall texture (not yet wired) |
+| `assets/textures/floor.png` | Floor texture (not yet wired) |
+| `assets/textures/ceiling.png` | Ceiling texture (not yet wired) |
+
+### Shader overrides
+
+The game currently compiles shaders from source at `src/shaders/`. Editing those files and recompiling gives full control over the rendering pipeline — including changing shading model, adding post-processing, switching to a 2D renderer, or replacing the entire visual system.
+
+Planned: runtime shader hot-reload from `assets/shaders/` without recompiling.
+
+### Layout
+
+After editing item positions and room colors in dev mode, click **Save Layout**. This writes `layout.json` to the game directory. Planned: the game will load this file on start if present, allowing server operators to define custom layouts without recompiling.
+
+### Scripts (server developers)
+
+The Lua scripting system gives server operators full control over:
+
+- item placement and behavior
+- room color and atmosphere
+- sanity manipulation
+- event responses (door opens, item pickups, player movement)
+- custom messages and narrative
+
+Drop `.lua` files in `scripts/` and they load automatically. Multiple scripts are supported — all hooks from all scripts fire on each event.
 
 ---
 
 ## Game Concept
 
-**Genre:** Audio-based atmospheric horror  
-**Perspective:** 2D  
-**Setting:** A haunted hotel with shifting rooms  
-**Tone:** Psychological horror, isolation, dread, distorted reality
+**Genre:** 3D first-person atmospheric horror  
+**Engine:** Custom OpenGL renderer written in Rust  
+**Setting:** The Oceancrest Hotel — a shifting, hostile building  
+**Tone:** Psychological horror, isolation, escalating dread
 
-Audio is more important than visuals in this game. The player should rely heavily on sound cues, environmental noise, music, whispers, distortion, and silence to understand danger, direction, and story clues.
-
-AI-generated background songs and atmospheric layers are used to make the hotel feel unstable, haunted, and unpredictable.
-
----
-
-## Core Design Pillars
-
-### Audio-First Horror
-
-The game should make sound feel like a core mechanic, not just decoration.
-
-Examples:
-
-- distant footsteps
-- ventilation movement
-- whispers from walls or vents
-- distorted music
-- room-specific ambience
-- silence before danger
-- directional monster cues
-- sanity-based audio hallucinations
-
-### Shifting Reality
-
-Rooms change after doors are unlocked or after the monster catches the player. The hotel should feel unreliable and alive.
-
-The player should never feel fully safe or fully familiar with the layout.
-
-### Escalating Fear
-
-The more rooms the player unlocks, the scarier the hotel becomes.
-
-Progression should introduce:
-
-- stronger visual horror
-- more aggressive audio
-- altered room layouts
-- new hallucinations
-- returning objects in different places
-- increased monster intelligence
-
-### Psychological Pressure
-
-The sanity system should make the player feel that every mistake matters.
-
-Permanent sanity loss creates long-term pressure, while temporary sanity loss creates short-term urgency.
+Audio is the primary mechanic. Ambient loops, directional sound, a heartbeat that scales with insanity, and room-specific atmosphere all communicate danger, monster proximity, and story.
 
 ---
 
 ## Gameplay Loop
 
-1. Explore the hotel.
-2. Search for keys and useful items.
-3. Unlock a new room.
-4. The hotel layout changes.
-5. Sanity permanently decreases.
-6. The monster becomes more dangerous.
-7. Audio and visual horror intensify.
-8. Repeat until every room is unlocked.
-9. Enter the final room: **The Room**.
-10. Survive the final encounter and escape.
-
----
-
-## Main Objective
-
-The player must unlock all rooms in the hotel.
-
-The exit cannot be accessed immediately because the final key is hidden in the last room. This final room is called **The Room**.
-
-To escape, the player must:
-
-- unlock every room
-- survive the changing hotel layout
-- manage sanity
-- avoid or counter the monster
-- find the final exit key
-- survive the final face-to-face encounter
-
----
-
-## Room System
-
-The hotel contains multiple locked rooms. Each time the player unlocks another room, the hotel changes.
-
-### Room Changes
-
-When rooms change:
-
-- room positions may shift
-- key locations may move
-- previously explored rooms may become different
-- visual atmosphere changes
-- audio atmosphere changes
-- horror elements increase
-- the monster state may become more threatening
-
-The player never knows exactly where the next key is unless they explore.
-
-### Permanent Sanity Cost
-
-Each major room change permanently reduces sanity by **20%**.
-
-This permanent sanity damage cannot be healed with sanity pills.
+1. Start in the main room.
+2. Find keys hidden throughout the hotel.
+3. Use a key to unlock a new room.
+4. The hotel changes — items move, sanity drops permanently by 20%.
+5. The monster becomes more dangerous.
+6. Audio and visual horror intensify.
+7. Repeat until all rooms are unlocked.
+8. Enter **The Room**.
+9. Survive the final encounter.
+10. Escape.
 
 ---
 
 ## Sanity System
 
-Sanity is split into two types of loss:
+Sanity has two separate pools:
 
-### Temporary Sanity Loss
+### Permanent ceiling (`base`)
 
-Temporary sanity decreases over time or because of fear events.
+Starts at 1.0. Decreases by **20%** each time a locked door is opened.  
+**Cannot be restored.** Pills and music cannot heal this.
 
-This can be healed using sanity pills.
+### Current sanity
 
-### Permanent Sanity Loss
+Drains passively over time (~3 minutes to fully drain at normal rate).  
+Can be restored up to the current `base` ceiling using sanity pills or the CD player.
 
-Permanent sanity decreases when the hotel layout changes.
+### Effects of low sanity
 
-Each room change permanently lowers sanity by **20%**.
+- The 3D world desaturates toward a cold sickly green-grey
+- Colors darken dramatically as sanity approaches zero
+- Dark red vignette closes in from the screen edges
+- Heartbeat audio fades in above ~35% insanity and intensifies toward 100%
 
-Sanity pills cannot restore permanent sanity loss.
+### Restoring sanity
 
-### Sanity Pills
-
-Sanity pills restore only temporary sanity loss.
-
-They do not reverse damage caused by room changes.
+| Method | Amount | Restores permanent? |
+|---|---|---|
+| Sanity pill | +25% | No |
+| CD player (with CD inserted) | +0.6%/min | No |
+| Wind-up toy (distraction) | +4% | No |
 
 ---
 
 ## Monster System
 
-The monster is not present from the start. It appears after the player uses the first key to unlock the next door.
+The monster (Isaac Remington / The Entity) does not appear at the start.
 
-### Monster Behavior
+It spawns the first time the player uses a key to open a locked door.
 
-Every minute, the monster teleports to another room that does not currently contain the player. In story terms, it moves through the ventilation system.
+### Behavior
 
-The monster becomes more dangerous the longer the player survives.
+- Teleports every 60 seconds to a room that does not contain the player
+- Moves toward the player's last known position between teleports
+- Gets faster with each catch
+- Will visit locations the player frequents (planned)
 
-### Escalation
+### Catch system
 
-Over time, the monster:
+Max catches: **8**
 
-- moves faster
-- tracks the player more intelligently
-- gets closer to the player more often
-- visits locations the player frequently uses
-- becomes more aggressive as the game progresses
+Each catch:
+- triggers room changes
+- changes visual and audio atmosphere
+- increases monster speed
+- decreases current sanity slightly
 
-### Catch System
+### Weakness
 
-Maximum catches: **8**
-
-When the monster catches the player:
-
-- rooms change
-- visuals change
-- audio changes
-- the hotel becomes more hostile
+Isaac Remington is weak to **light** and to a sound frequency of **6798 Hz** — which the CD player may be able to produce.
 
 ---
 
@@ -202,449 +347,197 @@ When the monster catches the player:
 
 ### Keys
 
-Used to unlock rooms and progress through the hotel.
-
-### Wind-Up Toy
-
-A distraction item that may be used to lure or misdirect the monster.
+Each key unlocks one specific door. Keys shuffle to new rooms each time a door is opened.
 
 ### Sanity Pills
 
-Restore temporary sanity loss only.
+Restore 25% of temporary sanity. Do not heal permanent sanity loss.
 
-They cannot heal permanent sanity damage.
+Use: select in hotbar, press **F**.
+
+### Wind-Up Toy
+
+Place it as a noise decoy. Using it (**F**) drops it at your feet, making a clicking sound that can lure the monster.  
+Also grants a small (+4%) sanity boost from the familiar noise.
 
 ### CD
 
-A collectible or usable audio item.
-
-Potential uses:
-
-- story clue
-- puzzle solution
-- music trigger
-- frequency mechanic
-- distraction
+Insert into the CD Player by carrying it and pressing **E** near the player.  
+While playing, sanity restores at ~0.6%/minute.
 
 ### CD Player
 
-Used to play CDs.
-
-Potential gameplay use:
-
-- trigger story memories
-- play calming audio
-- activate sound-based puzzles
-- interact with the monster weakness
+A fixed fixture (cannot be picked up). Interact with **E** while holding a CD to insert it and start music playback.
 
 ---
 
 ## Locations
 
-## First Floor
+### First Floor
 
-- Main room / player starting room
-- Bathroom
-- Bedrooms
-- Hall
-- Kitchen
-- Dining room
+| Room | Notes |
+|---|---|
+| Main Room | Player start. Warm amber tones. |
+| Bathroom | Teal tiles. |
+| Bedroom A | Dusty mauve. |
+| Bedroom B | Sage green. |
+| Hall | Cool blue-grey corridor. |
+| Kitchen | Warm yellow. |
+| Dining Room | Terracotta. |
 
-## Second Floor
+### Second Floor
 
-- Bedrooms
-- Bathroom
-- Hallways
-- Hole in the center
-- Staircase
+| Room | Notes |
+|---|---|
+| Bathroom | Deeper teal. |
+| Bedroom A | Deeper mauve. |
+| Bedroom B | Deeper sage. |
+| Upper Hall | Cold, darker than floor 1. |
+| The Room | Blood red. Final encounter. |
 
-The second floor does not include:
+Floor 2 is accessed via the staircase in the Hall area (x: 4–6, z: -1 to 3). The floor transition is smooth — walk up the slope.
 
-- kitchen
-- dining room
-- main room
+No kitchen, dining room, or starting main room on floor 2.
 
 ---
 
 ## Characters
 
-## Blarg Thompson
+### Blarg Thompson — Player character
 
-**Role:** Player character
-
-| Attribute | Detail |
+| | |
 |---|---|
-| Full Name | Blarg Thompson |
-| Gender | Male |
 | Age | 32 |
-| Height | 5'11" / 180 cm |
-| Weight | 165 lbs / 75 kg |
-| Eye Color | Hazel |
-| Hair Color | Dark Brown |
-| Ethnicity | Caucasian |
-| Skin Color | Light |
-| Marital Status | Single |
 | Occupation | Software Developer |
+| Height | 5'11" / 180 cm |
 
-### Background
+Blarg grew up in the Midwest, moved to a big city for college, and developed a passion for urban exploration and urban legends. Logical, methodical, and skeptical — but deeply curious about the unexplained.
 
-Blarg grew up in a small town in the Midwest. He later moved to a large city for college, where he developed an interest in technology and urban exploration.
-
-His fascination with urban legends began after an encounter with a mysterious local legend during his college years.
-
-### Personality
-
-Blarg is curious, logical, and slightly skeptical of the supernatural. He approaches problems methodically and relies on reason, but he is deeply fascinated by mysteries.
-
-### Strengths
-
-- analytical thinking
-- technical knowledge
-- puzzle solving
-- resourcefulness
-
-### Weaknesses
-
-- overly logical
-- sometimes dismissive of emotions
-- mild claustrophobia
+**Strengths:** analytical thinking, puzzle solving, resourcefulness  
+**Weaknesses:** overly logical, dismissive of emotions, mild claustrophobia
 
 ---
 
-## Isaac Remington / The Entity
+### Isaac Remington — The Entity
 
-**Role:** Main antagonist
-
-| Attribute | Detail |
+| | |
 |---|---|
-| Full Name | Isaac Remington |
-| Gender | Male |
 | Age | 45 |
 | Height | 7'0" / 213 cm |
-| Weight | Variable |
-| Eye Color | Black with a faint red glow |
-| Hair Color | None |
-| Ethnicity | American, but features are distorted |
-| Skin Color | Pale, almost translucent, with visible veins |
-| Marital Status | Single |
-| Former Occupation | Neuroscientist and AI researcher |
+| Former Occupation | Neuroscientist, AI researcher |
 
-### Background
+Dr. Remington developed an AI capable of interfacing directly with the human brain. Diagnosed with aggressive brain cancer, he replaced parts of his brain and organs with AI-enhanced prosthetics. The procedure went wrong. He is now a malevolent entity haunting the hotel, growing stronger as Blarg's sanity declines.
 
-Dr. Isaac Remington was a brilliant neuroscientist who developed an AI capable of interfacing directly with the human brain.
-
-After being diagnosed with aggressive brain cancer, he replaced parts of his brain and organs with AI-enhanced prosthetics. The transformation had catastrophic side effects, turning him into a malevolent entity.
-
-He now haunts the hotel, manipulates reality, and preys on guests' sanity.
-
-### Personality
-
-Isaac is malicious, cunning, and patient. He enjoys psychological torment and prefers to drive victims close to madness before attacking.
-
-### Strengths
-
-- manipulates the environment
-- induces hallucinations
-- teleports between rooms
-- grows stronger as sanity decreases
-
-### Weakness
-
-Isaac is weak to light and a specific sound frequency:
-
-```text
-6798 Hz
-```
+**Strengths:** manipulates environment, induces hallucinations, teleports between rooms, grows stronger with insanity  
+**Weakness:** light and sound at 6798 Hz
 
 ---
 
-## Evelyn Parker
+### Evelyn Parker — Ghostly Hotel Staff
 
-**Role:** Ghostly hotel staff / helper character
-
-| Attribute | Detail |
-|---|---|
-| Full Name | Evelyn Parker |
-| Gender | Female |
-| Age | Appears late 20s |
-| Height | 5'6" / 168 cm |
-| Weight | 130 lbs / 59 kg |
-| Eye Color | Blue |
-| Hair Color | Blonde |
-| Ethnicity | Caucasian |
-| Skin Color | Pale with a ghostly glow |
-| Marital Status | Single |
-| Former Occupation | Hotel Manager |
-
-### Background
-
-Evelyn was the kind and diligent manager of the hotel. She disappeared decades ago and now remains as a ghostly presence.
-
-She helps Blarg navigate the hotel, although her memories are fragmented.
-
-### Personality
-
-Compassionate, resourceful, melancholic, and determined to help Blarg uncover the truth.
-
-### Strengths
-
-- knows the hotel's history
-- understands parts of the layout
-- can appear and disappear
-
-### Weaknesses
-
-- limited physical interaction
-- fragmented and unreliable memories
+Former hotel manager. Disappeared decades ago. Now exists as a ghost trying to help Blarg navigate the hotel and piece together its history. Her memories are fragmented and not always reliable.
 
 ---
 
-## Michael "Mike" Williams
+### Michael "Mike" Williams — Ghostly Hotel Guest
 
-**Role:** Ghostly hotel guest / music-based support character
-
-| Attribute | Detail |
-|---|---|
-| Full Name | Michael "Mike" Williams |
-| Gender | Male |
-| Age | 34 |
-| Height | 6'0" / 183 cm |
-| Weight | 180 lbs / 82 kg |
-| Eye Color | Green |
-| Hair Color | Black |
-| Ethnicity | African American |
-| Skin Color | Dark |
-| Marital Status | Married |
-| Occupation | Musician |
-
-### Background
-
-Mike was a traveling musician who stayed at the hotel during a tour. He is a friendly spirit haunted by his untimely death.
-
-### Personality
-
-Charismatic, humorous, optimistic, and emotionally supportive.
-
-### Strengths
-
-- creates calming music
-- temporarily slows sanity loss
-- provides emotional contrast to the horror
-
-### Weakness
-
-Mike is bound to the room where he died and cannot leave it.
+A traveling musician who died at the hotel. Friendly, charismatic, and optimistic despite his circumstances. His music can temporarily slow sanity loss. He cannot leave the room where he died.
 
 ---
 
-## Linda Garcia
+### Linda Garcia — Ghostly Hotel Guest
 
-**Role:** Ghostly hotel guest / guidance character
-
-| Attribute | Detail |
-|---|---|
-| Full Name | Linda Garcia |
-| Gender | Female |
-| Age | 28 |
-| Height | 5'4" / 162 cm |
-| Weight | 125 lbs / 57 kg |
-| Eye Color | Brown |
-| Hair Color | Dark Brown |
-| Ethnicity | Hispanic |
-| Skin Color | Medium |
-| Marital Status | Engaged |
-| Occupation | Teacher |
-
-### Background
-
-Linda was a school teacher staying at the hotel for a conference. She remains as a gentle spirit who tries to guide Blarg.
-
-### Personality
-
-Nurturing, intelligent, calm, and helpful.
-
-### Strengths
-
-- gives hints
-- helps solve puzzles
-- provides guidance
-
-### Weakness
-
-Her presence can attract The Entity, so she cannot appear too often.
+A school teacher attending a conference. Now a gentle guiding spirit. She can provide hints and puzzle clues, but her presence occasionally attracts The Entity — so she appears sparingly.
 
 ---
 
-# Story
+## Story
 
-## Prologue: Ocean Breeze, Fading Light
+### Prologue
 
-You are Blarg Thompson, arriving at the Oceancrest Hotel for what was supposed to be the perfect vacation.
+You are Blarg Thompson. You arrive at the Oceancrest Hotel for a vacation. Florida sun, ocean view, cold drinks. Everything looks perfect.
 
-The Florida sun is bright, the hotel looks luxurious, and the ocean view promises rest. At first, everything feels peaceful.
+### Scene I — The Perfect Room
 
-That peace does not last.
+Your suite is exactly what you wanted. Sunlight, white linens, a leather couch, turquoise water visible from the balcony. For a moment, you relax completely.
 
----
+### Scene II — Beachside Reverie
 
-## Scene I: The Perfect Room
+You head down to the beach. Music plays, people laugh. You forget sunscreen. You go back inside to get it.
 
-Blarg enters his hotel room.
+That is the last normal moment.
 
-Sunlight fills the suite. A queen bed, clean white sheets, a leather couch, a wall-mounted television, and a balcony view of turquoise waves all suggest comfort and safety.
+### Scene III — Unnerving Silence
 
-For a moment, the hotel feels normal.
+The lobby is empty. The tropical air is gone. The bass from the beach party has disappeared. The front desk is unmanned. Your voice echoes wrong.
 
----
+### Scene IV — Lights Out
 
-## Scene II: Beachside Reverie
+You reach your floor. Every light in the corridor — and your room — snaps off at once. You hear something metallic behind you. Nothing is there.
 
-Blarg heads to the beach.
+### Scene V — First Ominous Clue
 
-There is music, warm sand, food from the tiki bar, and people enjoying the evening. But after a short time, he realizes he forgot sunscreen and heads back to his room.
+On the bedside table is a folded note on hotel stationery:
 
-This small decision leads him away from the normal world.
+> *Dear Guest,*  
+> *We hope you're enjoying your stay. For your safety, please remain in your room until further notice.*  
+> *— Management*
 
----
+No explanation. No signature that feels real.
 
-## Scene III: Unnerving Silence
+### Scene VI — The Whispering Vent
 
-Blarg returns to the lobby.
+The ventilation begins to whisper:
 
-The music is gone. The tropical air feels muted. The front desk is empty. The hotel no longer feels inhabited.
+> *"...don't trust the lights..."*  
+> *"...he sees you..."*
 
-He calls out, but only his own voice answers.
+### Scene VII — Turning Point
 
-Something has changed.
-
----
-
-## Scene IV: Lights Out
-
-Blarg reaches his room.
-
-The lights in the hallway and inside the room suddenly go out. The darkness feels heavy and unnatural.
-
-A metallic sound echoes behind him.
-
-There is no visible source.
+The hotel is now a cage. Blarg must survive using logic, whatever he can find, and whatever the ghosts are willing to tell him.
 
 ---
 
-## Scene V: First Ominous Clue
+## Implementation Status
 
-Inside the room, Blarg finds a folded note on hotel stationery:
+### Done
 
-```text
-Dear Guest,
+- 3D first-person renderer (OpenGL 3.3, custom shaders)
+- Two-floor hotel with 12 rooms and a staircase
+- WASD movement, mouse look, jump, collision, gravity
+- Door unlock chain — each key opens one door in sequence
+- Item system — keys, sanity pills, wind-up toy, CD, CD player
+- Grab mechanic (G), throw (R), bag while holding (E)
+- Inventory with hotbar (1–5), full inventory screen (Tab)
+- Sanity system — passive drain, permanent hits on door unlock, pill restore
+- Sanity visual effects — desaturation, cold color shift, darkening, edge vignette
+- Item shuffle — items move to random positions when a door is unlocked
+- CD player interaction — insert CD, sanity restores slowly while playing
+- Wind-up toy — drop as noise decoy, small sanity boost
+- Audio manager — ambient loop, heartbeat (scales with insanity), door/pickup SFX
+- Main menu, pause menu, settings (sensitivity, FOV, volume, fullscreen, FPS counter)
+- Character customization screen (name, skin tone, hair/shirt/pants color)
+- Multiplayer lobby UI (network stub, not yet functional)
+- Dev mode (F2) — item editor, room color editor, Lua console, fly cam, save layout
+- Lua scripting engine — hooks, game API, hot-reload, auto-created example script
+- 16:9 aspect ratio lock with letterbox/pillarbox at any window size
+- Settings persistence (JSON)
+- Character save/load (JSON)
 
-We hope you're enjoying your stay. For your safety, please remain in your room until further notice.
+### Planned / In Progress
 
-— Management
-```
-
-The note feels official, but wrong. There is no explanation, no signature, and no sense of comfort.
-
----
-
-## Scene VI: The Whispering Vent
-
-The vents begin to whisper.
-
-Blarg hears fragments:
-
-```text
-"...don't trust the lights..."
-"...he sees you..."
-```
-
-The hotel is no longer just empty. It is aware.
-
----
-
-## Scene VII: Turning Point
-
-The vacation is over.
-
-The hotel has become a cage, and Blarg must survive using logic, caution, and anything he can find.
-
-His first goals are clear:
-
-- investigate the lobby
-- follow the whispers carefully
-- secure a light source
-- find out who left the note
-
-The Oceancrest Hotel is not what it seems.
-
-The real journey begins in the dark.
+- Monster (Isaac Remington) — spawn, teleport, AI pathfinding, catch system
+- Ghost characters (Evelyn, Mike, Linda) — appearances, dialogue, hints
+- Real 3D models (OBJ loading via `tobj` is wired; geometry is still boxes)
+- Texture mapping (UV data is in the mesh; sampler not yet in shader)
+- Hallucinations tied to sanity level
+- Final room encounter
+- Story notes and narrative events
+- Runtime shader hot-reload from files
+- `layout.json` loading at startup
+- Multiplayer (network layer stubbed out)
+- Sound frequency mechanic (6798 Hz / CD player interaction with monster)
 
 ---
 
-# Development Notes
-
-## Priority Features
-
-- 2D exploration system
-- locked-room progression
-- dynamic room layout changes
-- sanity system
-- permanent and temporary sanity damage
-- monster teleportation
-- monster AI escalation
-- audio-first environmental design
-- key/item system
-- final room encounter
-- story notes and ghost encounters
-
-## Audio Design Requirements
-
-Audio should communicate:
-
-- danger
-- monster proximity
-- room identity
-- sanity level
-- hallucinations
-- hidden clues
-- ghost presence
-- environmental changes
-
-The game should remain scary even with simple visuals.
-
-## Possible Puzzle Mechanics
-
-- finding keys after room shifts
-- using the CD player to trigger memories
-- playing 6798 Hz to weaken The Entity
-- using the wind-up toy as a sound distraction
-- following whispers to find clues
-- avoiding misleading audio hallucinations
-- using light sources to create temporary safety
-
-## Possible Win Condition
-
-The player wins by:
-
-1. unlocking every room
-2. entering **The Room**
-3. surviving the final encounter with Isaac Remington
-4. obtaining the exit key
-5. escaping the Oceancrest Hotel
-
-## Possible Lose Conditions
-
-The player loses if:
-
-- sanity reaches zero
-- the monster catches the player too many times
-- the player fails the final encounter
-- the hotel fully consumes Blarg's reality
-
----
-
-# Project Status
-
-Current status: **Concept / early design document**
-
-This README defines the core idea, mechanics, characters, and story foundation for the game.
+*Built with Rust. Horror optional. Audio mandatory.*
