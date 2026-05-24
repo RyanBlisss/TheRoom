@@ -20,12 +20,14 @@ pub struct Item {
     pub pickupable: bool,
     pub label:      &'static str,
     pub vel_y:      f32,
+    pub vel_x:      f32,
+    pub vel_z:      f32,
     pub landed:     bool,
 }
 
 impl Item {
     fn make(kind: ItemKind, pos: glm::Vec3, label: &'static str) -> Self {
-        Self { kind, position: pos, picked_up: false, pickupable: true, label, vel_y: 0.0, landed: false }
+        Self { kind, position: pos, picked_up: false, pickupable: true, label, vel_y: 0.0, vel_x: 0.0, vel_z: 0.0, landed: false }
     }
     pub fn key(room_id: usize, pos: glm::Vec3) -> Self {
         Self::make(ItemKind::Key { room_id }, pos, "Key")
@@ -46,16 +48,28 @@ impl Item {
         item
     }
 
-    /// Apply gravity each frame until item rests on floor_y.
+    /// Apply gravity and XZ velocity each frame until item rests on floor_y.
     pub fn physics_tick(&mut self, dt: f32, floor_y: f32) {
         if self.picked_up || self.landed || !self.pickupable { return; }
+
         self.vel_y      += GRAVITY * dt;
+        self.position.x += self.vel_x * dt;
         self.position.y += self.vel_y * dt;
+        self.position.z += self.vel_z * dt;
+
+        // Friction — XZ velocity bleeds off after landing
+        let friction = (1.0 - dt * 5.5).max(0.0);
+        self.vel_x *= friction;
+        self.vel_z *= friction;
+
         let rest_y = floor_y + ITEM_HALF_SIZE;
         if self.position.y <= rest_y {
             self.position.y = rest_y;
-            self.vel_y      = 0.0;
-            self.landed     = true;
+            self.vel_y = self.vel_y.abs() * -0.25; // small bounce
+            if self.vel_y.abs() < 0.15 {
+                self.vel_y  = 0.0;
+                self.landed = self.vel_x.abs() < 0.05 && self.vel_z.abs() < 0.05;
+            }
         }
     }
 }

@@ -66,6 +66,8 @@ struct PlayingState {
     cd_playing:     bool,
     cd_restore_acc: f32,
     held_item:      Option<usize>, // index into items vec
+    throw_charge:   f32,          // 0..1, builds while R is held
+    throw_charging: bool,
 }
 
 impl PlayingState {
@@ -114,6 +116,8 @@ impl PlayingState {
             cd_playing:     false,
             cd_restore_acc: 0.0,
             held_item:      None,
+            throw_charge:   0.0,
+            throw_charging: false,
         }
     }
 
@@ -168,14 +172,22 @@ impl PlayingState {
 
     fn throw_held(&mut self) {
         if let Some(idx) = self.held_item.take() {
-            let fwd = self.player.forward_3d();
+            let charge = self.throw_charge.max(0.08); // minimum flick even on tap
+            let speed  = 4.0 + charge * 14.0;        // 4 m/s flick → 18 m/s full charge
+            let fwd    = self.player.forward_3d();
+
             let item = &mut self.items[idx];
-            item.vel_y   = fwd.y * 6.0 + 2.0;
-            item.landed  = false;
-            // Horizontal throw impulse stored on the item — we'll apply it in physics
-            // For simplicity: just fling it by offsetting position + giving vel_y a boost
-            item.position = self.player.eye_position() + fwd * 0.6;
-            self.show_msg("Thrown.");
+            item.position = self.player.eye_position() + fwd * 0.7;
+            item.vel_x    = fwd.x * speed;
+            item.vel_y    = fwd.y * speed + 1.5; // slight upward arc
+            item.vel_z    = fwd.z * speed;
+            item.landed   = false;
+
+            self.throw_charge   = 0.0;
+            self.throw_charging = false;
+
+            let label = if charge > 0.7 { "HURLED!" } else if charge > 0.3 { "Thrown." } else { "Tossed." };
+            self.show_msg(label);
         }
     }
 
@@ -287,7 +299,7 @@ impl PlayingState {
         }
     }
 
-    fn update(&mut self, keys: &HashSet<VirtualKeyCode>, dt: f32) {
+    fn update(&mut self, keys: &HashSet<VirtualKeyCode>, dt: f32, fly_cam: bool) {
         self.sanity.tick(dt);
 
         if self.cd_playing {
@@ -300,7 +312,7 @@ impl PlayingState {
         }
 
         self.audio.tick_heartbeat(self.sanity.insanity(), dt);
-        self.player.update(keys, dt, &self.world.walls, Some(&self.world.stairs));
+        self.player.update(keys, dt, &self.world.walls, Some(&self.world.stairs), fly_cam);
 
         for item in &mut self.items {
             let floor_y = if item.position.y > world::FLOOR_2 - 0.5 {
@@ -309,6 +321,13 @@ impl PlayingState {
                 world::FLOOR_1
             };
             item.physics_tick(dt, floor_y);
+        }
+
+        // Throw charge — accumulates while R is held with an item
+        if self.throw_charging && self.held_item.is_some() {
+            self.throw_charge = (self.throw_charge + dt * 0.9).min(1.0);
+        } else if !self.throw_charging {
+            self.throw_charge = 0.0;
         }
 
         // Keep held item floating in front of camera
@@ -505,7 +524,18 @@ impl App {
             } => {
                 match ks {
                     ElementState::Pressed  => { self.keys.insert(*key); }
-                    ElementState::Released => { self.keys.remove(key); }
+                    ElementState::Released => {
+                        self.keys.remove(key);
+                        // R release = throw with accumulated charge
+                        if *key == VirtualKeyCode::R {
+                            if let Some(g) = &mut self.game {
+                                if g.throw_charging {
+                                    g.throw_charging = false;
+                                    g.throw_held();
+                                }
+                            }
+                        }
+                    }
                 }
                 if *ks == ElementState::Pressed {
                     self.on_key(*key, window);
@@ -515,7 +545,8 @@ impl App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left, ..
             } => {
-                if self.phase == GamePhase::Playing && !self.inventory_open {
+                // Don't recapture when dev mode is open — cursor must stay free
+                if self.phase == GamePhase::Playing && !self.inventory_open && !self.devmode.active {
                     self.capture(window, true);
                 }
             }
@@ -589,15 +620,30 @@ impl App {
                 }
                 VirtualKeyCode::F2 => {
                     self.devmode.toggle();
-                    // Dev mode pauses mouse capture so UI is usable
-                    self.capture(window, !self.devmode.active);
+                    if self.devmode.active {
+                        // Enter dev mode: free the mouse, enable fly cam
+                        self.capture(window, false);
+                        self.fly_cam = true;
+                        self.devmode.fly_cam = true;
+                    } else {
+                        // Exit dev mode: recapture mouse, disable fly cam
+                        self.fly_cam = false;
+                        self.devmode.fly_cam = false;
+                        self.capture(window, true);
+                    }
                 }
                 VirtualKeyCode::Tab => {
                     self.inventory_open = !self.inventory_open;
                     self.capture(window, !self.inventory_open);
                 }
                 VirtualKeyCode::G => { if let Some(g) = &mut self.game { g.try_grab(); } }
-                VirtualKeyCode::R => { if let Some(g) = &mut self.game { g.throw_held(); } }
+                VirtualKeyCode::R => {
+                    if let Some(g) = &mut self.game {
+                        if g.held_item.is_some() {
+                            g.throw_charging = true; // start charge on press
+                        }
+                    }
+                }
                 VirtualKeyCode::E => {
                     if let Some(g) = &mut self.game {
                         if g.held_item.is_some() { g.bag_held(); } else { g.try_interact(); }
@@ -622,7 +668,14 @@ impl App {
     }
 
     fn on_mouse_motion(&mut self, dx: f64, dy: f64) {
-        if self.mouse_captured && !self.inventory_open {
+        // In dev mode: look only while right mouse button is held (free cursor otherwise)
+        // In normal play: look whenever mouse is captured
+        let should_look = if self.devmode.active {
+            self.keys.contains(&VirtualKeyCode::LControl) // hold Ctrl to look in dev mode
+        } else {
+            self.mouse_captured && !self.inventory_open
+        };
+        if should_look {
             if let Some(g) = &mut self.game {
                 g.player.apply_mouse(dx as f32, dy as f32, self.settings.mouse_sensitivity);
             }
@@ -647,9 +700,10 @@ impl App {
         self.network.tick();
 
         if self.phase == GamePhase::Playing {
-            let keys = self.keys.clone();
+            let keys     = self.keys.clone();
+            let fly_cam  = self.fly_cam;
             if let Some(g) = &mut self.game {
-                g.update(&keys, dt);
+                g.update(&keys, dt, fly_cam);
             }
         }
     }
@@ -940,24 +994,25 @@ impl App {
         let msg      = self.game.as_ref().and_then(|g| g.message.as_ref()).map(|(m,_)| m.clone());
         let sel      = self.game.as_ref().map(|g| g.selected_slot).unwrap_or(0);
         let inv: Vec<ItemKind> = self.game.as_ref().map(|g| g.inventory.items.clone()).unwrap_or_default();
-        let room_name = self.game.as_ref().map(|g| g.world.room_name_at(&g.player.position)).unwrap_or("");
-        let fps      = self.fps;
-        let show_fps = self.settings.show_fps;
+        let room_name    = self.game.as_ref().map(|g| g.world.room_name_at(&g.player.position)).unwrap_or("");
+        let fps          = self.fps;
+        let show_fps     = self.settings.show_fps;
+        let throw_charge = self.game.as_ref().map(|g| if g.throw_charging { g.throw_charge } else { -1.0 }).unwrap_or(-1.0);
 
         let raw = self.take_raw_input();
         let out = self.egui_ctx.run(raw, |ctx| {
-            // ── Sanity vignette overlay ───────────────────────────────────
+            // ── Sanity vignette — only below 35% sanity, subtle frame ────
             let insanity = 1.0 - sanity;
-            if insanity > 0.05 {
+            let vignette_t = ((insanity - 0.65) / 0.35).clamp(0.0, 1.0); // 0 at 35% sanity, 1 at 0%
+            if vignette_t > 0.01 {
                 egui::Area::new("vignette")
                     .anchor(egui::Align2::LEFT_TOP, [0.0, 0.0])
                     .show(ctx, |ui| {
                         let screen = ctx.screen_rect();
                         let p = ui.painter();
-                        let alpha = (insanity * insanity * 210.0) as u8;
-                        let col = egui::Color32::from_rgba_premultiplied(90, 0, 10, alpha);
-                        let edge = screen.width().min(screen.height()) * 0.30;
-                        // Four edge strips — darkness closing in
+                        let alpha = (vignette_t * vignette_t * 95.0) as u8;
+                        let col = egui::Color32::from_rgba_premultiplied(80, 0, 8, alpha);
+                        let edge = screen.width().min(screen.height()) * 0.18;
                         p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + edge)), 0.0, col);
                         p.rect_filled(egui::Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - edge), screen.max), 0.0, col);
                         p.rect_filled(egui::Rect::from_min_max(screen.min, egui::pos2(screen.min.x + edge, screen.max.y)), 0.0, col);
@@ -1018,6 +1073,18 @@ impl App {
                         }
                     });
                 });
+
+            // ── Throw charge bar ──────────────────────────────────────────
+            if throw_charge >= 0.0 {
+                egui::Area::new("throw_charge")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
+                    .show(ctx, |ui| {
+                        let col = if throw_charge > 0.75 { egui::Color32::from_rgb(240, 80, 50) }
+                                  else if throw_charge > 0.4 { egui::Color32::from_rgb(230, 175, 50) }
+                                  else { egui::Color32::from_rgb(120, 200, 120) };
+                        ui.add(egui::ProgressBar::new(throw_charge).desired_width(120.0).fill(col));
+                    });
+            }
 
             // ── Message ───────────────────────────────────────────────────
             if let Some(m) = &msg {

@@ -66,7 +66,26 @@ impl Player {
         dt: f32,
         walls: &[crate::world::Wall],
         stairs: Option<&crate::world::StairBounds>,
+        fly_cam: bool,
     ) {
+        if fly_cam {
+            // ── Fly cam: full 3D free movement, no collision, no gravity ──
+            let speed = MOVE_SPEED * 2.2;
+            let fwd   = self.forward_3d();
+            let right = self.right_xz();
+            let mut vel = glm::vec3(0.0f32, 0.0, 0.0);
+            if keys.contains(&VirtualKeyCode::W)      { vel += fwd   * speed; }
+            if keys.contains(&VirtualKeyCode::S)      { vel -= fwd   * speed; }
+            if keys.contains(&VirtualKeyCode::A)      { vel += right * speed; }
+            if keys.contains(&VirtualKeyCode::D)      { vel -= right * speed; }
+            if keys.contains(&VirtualKeyCode::Space)  { vel.y += speed; }
+            if keys.contains(&VirtualKeyCode::LShift) { vel.y -= speed; }
+            self.position += vel * dt;
+            self.vel_y     = 0.0;
+            self.on_ground = false;
+            return;
+        }
+
         // ── Horizontal movement ───────────────────────────────────────────
         let mut velocity = glm::vec3(0.0f32, 0.0, 0.0);
         if keys.contains(&VirtualKeyCode::W) { velocity += self.forward_xz() * MOVE_SPEED; }
@@ -103,7 +122,7 @@ impl Player {
 
             if self.position.y >= ceiling_y {
                 self.position.y = ceiling_y;
-                self.vel_y      = self.vel_y.min(0.0); // kill upward velocity only
+                self.vel_y      = self.vel_y.min(0.0);
             }
 
             if self.position.y <= floor_y {
